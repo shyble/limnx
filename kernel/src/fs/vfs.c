@@ -966,19 +966,39 @@ static int itoa_simple(uint64_t val, char *buf, int bufsize) {
     return pos;
 }
 
-/* Simple sprintf for status file content */
+/* Map internal thread state to Linux /proc state letter
+ *   0=ready    → R (runnable on the ready queue)
+ *   1=running  → R
+ *   2=dead     → Z (zombie — process_t still around until waitpid)
+ *   3=stopped  → T (SIGSTOP / SIGTSTP)
+ *   4=blocked  → S (interruptible sleep)
+ */
+static char procfs_state_letter(uint8_t state) {
+    switch (state) {
+        case 0: return 'R';
+        case 1: return 'R';
+        case 2: return 'Z';
+        case 3: return 'T';
+        case 4: return 'S';
+        default: return '?';
+    }
+}
+
+static const char *procfs_state_word(char letter) {
+    switch (letter) {
+        case 'R': return "running";
+        case 'S': return "sleeping";
+        case 'T': return "stopped";
+        case 'Z': return "zombie";
+        default:  return "unknown";
+    }
+}
+
+/* Simple sprintf for status file content (Linux /proc/<pid>/status format) */
 static int procfs_format_status(struct process *p, char *buf, int bufsize) {
     int pos = 0;
     const char *name = procfs_get_name(p);
-    uint8_t state = procfs_get_thread_state(p);
-    const char *state_str = "unknown";
-    switch (state) {
-        case 0: state_str = "ready"; break;
-        case 1: state_str = "running"; break;
-        case 2: state_str = "dead"; break;
-        case 3: state_str = "stopped"; break;
-        case 4: state_str = "blocked"; break;
-    }
+    char letter = procfs_state_letter(procfs_get_thread_state(p));
 
 #define APPEND_STR(s) do { \
     const char *_s = (s); \
@@ -997,11 +1017,26 @@ static int procfs_format_status(struct process *p, char *buf, int bufsize) {
 } while(0)
 
     APPEND_STR("Name:\t"); APPEND_STR(name[0] ? name : "(none)"); APPEND_STR("\n");
-    APPEND_STR("State:\t"); APPEND_STR(state_str); APPEND_STR("\n");
+    /* Linux format: "State:\t<letter> (<word>)\n" */
+    APPEND_STR("State:\t");
+    if (pos < bufsize - 1) buf[pos++] = letter;
+    APPEND_STR(" (");
+    APPEND_STR(procfs_state_word(letter));
+    APPEND_STR(")\n");
     APPEND_STR("Pid:\t"); APPEND_NUM(procfs_get_pid(p)); APPEND_STR("\n");
     APPEND_STR("PPid:\t"); APPEND_NUM(procfs_get_ppid(p)); APPEND_STR("\n");
-    APPEND_STR("Uid:\t"); APPEND_NUM(procfs_get_uid(p)); APPEND_STR("\n");
-    APPEND_STR("Gid:\t"); APPEND_NUM(procfs_get_gid(p)); APPEND_STR("\n");
+    /* Linux format: "Uid:\t<real>\t<eff>\t<saved>\t<fs>\n" — busybox reads real */
+    APPEND_STR("Uid:\t"); APPEND_NUM(procfs_get_uid(p));
+    APPEND_STR("\t"); APPEND_NUM(procfs_get_uid(p));
+    APPEND_STR("\t"); APPEND_NUM(procfs_get_uid(p));
+    APPEND_STR("\t"); APPEND_NUM(procfs_get_uid(p)); APPEND_STR("\n");
+    APPEND_STR("Gid:\t"); APPEND_NUM(procfs_get_gid(p));
+    APPEND_STR("\t"); APPEND_NUM(procfs_get_gid(p));
+    APPEND_STR("\t"); APPEND_NUM(procfs_get_gid(p));
+    APPEND_STR("\t"); APPEND_NUM(procfs_get_gid(p)); APPEND_STR("\n");
+    /* Linux uses VmSize in kB; report total VM pages * 4 kB. Field name kept as VmSize. */
+    APPEND_STR("VmSize:\t"); APPEND_NUM(procfs_get_mem_pages(p) * 4); APPEND_STR(" kB\n");
+    /* Limnx-specific fields below — busybox ignores unknown lines */
     APPEND_STR("Caps:\t"); APPEND_HEX(procfs_get_caps(p)); APPEND_STR("\n");
     APPEND_STR("VmPages:\t"); APPEND_NUM(procfs_get_mem_pages(p)); APPEND_STR("\n");
     APPEND_STR("SigPend:\t"); APPEND_HEX(procfs_get_pending_signals(p)); APPEND_STR("\n");
@@ -1012,6 +1047,48 @@ static int procfs_format_status(struct process *p, char *buf, int bufsize) {
 #undef APPEND_STR
 #undef APPEND_NUM
 #undef APPEND_HEX
+
+    buf[pos] = '\0';
+    return pos;
+}
+
+/* Linux /proc/<pid>/stat single-line format. Busybox ps parses this.
+ *   pid (name) state ppid pgid sid tty_nr tty_pgrp flags
+ *   minflt cminflt majflt cmajflt utime stime cutime cstime
+ *   priority nice num_threads itrealvalue starttime vsize rss
+ * Limnx fills in real values where it tracks them, zero/defaults elsewhere. */
+static int procfs_format_stat(struct process *p, char *buf, int bufsize) {
+    int pos = 0;
+    const char *name = procfs_get_name(p);
+    char letter = procfs_state_letter(procfs_get_thread_state(p));
+    uint64_t mem_pages = procfs_get_mem_pages(p);
+    uint64_t vsize_bytes = mem_pages * 4096;
+
+#define APPEND_STR(s) do { \
+    const char *_s = (s); \
+    while (*_s && pos < bufsize - 1) buf[pos++] = *_s++; \
+} while(0)
+#define APPEND_NUM(v) do { \
+    char _nb[24]; itoa_simple((v), _nb, 24); APPEND_STR(_nb); \
+} while(0)
+
+    APPEND_NUM(procfs_get_pid(p));
+    APPEND_STR(" (");
+    APPEND_STR(name[0] ? name : "none");
+    APPEND_STR(") ");
+    if (pos < bufsize - 1) buf[pos++] = letter;
+    APPEND_STR(" ");
+    APPEND_NUM(procfs_get_ppid(p));
+    /* pgid sid tty_nr tty_pgrp flags minflt cminflt majflt cmajflt
+       utime stime cutime cstime priority nice num_threads itrealvalue starttime */
+    APPEND_STR(" 0 0 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 0 ");
+    APPEND_NUM(vsize_bytes);
+    APPEND_STR(" ");
+    APPEND_NUM(mem_pages);
+    APPEND_STR("\n");
+
+#undef APPEND_STR
+#undef APPEND_NUM
 
     buf[pos] = '\0';
     return pos;
@@ -1065,13 +1142,23 @@ void vfs_procfs_register_pid(uint64_t pid) {
         }
     }
 
+    /* Create /proc/<pid>/stat — Linux single-line format for busybox ps */
+    uint8_t *tbuf = (uint8_t *)kmalloc(512);
+    if (tbuf) {
+        tbuf[0] = '\0';
+        int idx = vfs_register_node(dir_idx, "stat", VFS_FILE, 0, tbuf);
+        if (idx >= 0) {
+            nodes[idx].capacity = 512;
+        } else {
+            kfree(tbuf);
+        }
+    }
+
     /* Create /proc/<pid>/cwd — symlink to process cwd */
     struct process *p = process_lookup(pid);
     if (p) {
         const char *cwd = procfs_get_cwd(p);
         if (cwd && cwd[0]) {
-            vfs_symlink(path[0] == '/' ? spath : path, cwd);
-            /* Actually create cwd symlink properly */
             char cwdpath[MAX_PATH];
             int cp = 0;
             for (int i = 0; i < pos; i++) cwdpath[cp++] = path[i];
@@ -1136,18 +1223,24 @@ void vfs_procfs_refresh(uint64_t pid) {
         nodes[status_idx].size = (uint64_t)len;
     }
 
-    /* Update cmdline file */
+    /* Update cmdline file — Linux convention: arguments NUL-separated.
+     * argv_buf is already NUL-separated; copy as-is. Readers iterate by length. */
     int cmdline_idx = vfs_find_child(dir_idx, "cmdline");
     if (cmdline_idx >= 0 && nodes[cmdline_idx].data) {
         int alen = procfs_get_argv_buf_len(p);
         const char *abuf = procfs_get_argv_buf(p);
         if (alen > 0 && alen < 512) {
-            /* Copy argv_buf — NUL-separated args, replace NULs with spaces */
             for (int i = 0; i < alen; i++)
-                nodes[cmdline_idx].data[i] = abuf[i] ? (uint8_t)abuf[i] : ' ';
-            nodes[cmdline_idx].data[alen] = '\0';
+                nodes[cmdline_idx].data[i] = (uint8_t)abuf[i];
             nodes[cmdline_idx].size = (uint64_t)alen;
         }
+    }
+
+    /* Update /proc/<pid>/stat */
+    int stat_idx = vfs_find_child(dir_idx, "stat");
+    if (stat_idx >= 0 && nodes[stat_idx].data) {
+        int len = procfs_format_stat(p, (char *)nodes[stat_idx].data, 512);
+        nodes[stat_idx].size = (uint64_t)len;
     }
 }
 

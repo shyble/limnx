@@ -684,6 +684,14 @@ long sys_pipe2(long *rfd_ptr, long *wfd_ptr, long flags);
 /* TCP socket options */
 #define TCP_OPT_NONBLOCK 1
 
+/* --- Config file (INI) parsing for /etc/limnx.conf and similar --- */
+int  config_get(const char *path, const char *section, const char *key,
+                char *out, int out_size);
+long config_get_int(const char *path, const char *section, const char *key,
+                    long default_val);
+int  config_iter_section(const char *path, const char *section, int *state,
+                         char *key, int key_size, char *value, int value_size);
+
 /* Convenience: include all sub-headers so existing code keeps working */
 #include "tensor.h"
 #include "transformer.h"

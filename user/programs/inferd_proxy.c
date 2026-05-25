@@ -239,27 +239,43 @@ static int forward_request(const char *prompt, uint32_t prompt_len,
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) {
-        printf("Usage: inferd_proxy <host_ip> <port> [svc_name] [sock_path]\n");
-        return 1;
-    }
-
-    remote_ip   = parse_ip(argv[1]);
-    remote_port = (uint16_t)atoi(argv[2]);
-    const char *svc_name  = (argc >= 4) ? argv[3] : "default";
-    const char *sock_path = (argc >= 5) ? argv[4] : "/tmp/inferd_proxy.sock";
-
-    /* -f flag = foreground mode (for debugging) */
+    /* -f flag = foreground mode (for debugging) — strip it from argv first */
     int foreground = 0;
     if (argc >= 2 && strcmp(argv[1], "-f") == 0) {
         foreground = 1;
-        /* Shift args */
         argc--;
         for (int i = 1; i < argc; i++) argv[i] = argv[i + 1];
     }
 
+    /* Determine host/port from argv or /etc/limnx.conf [inference] */
+    char host_buf[64], port_buf[16];
+    const char *host_str = NULL;
+    const char *port_str = NULL;
+
+    if (argc >= 3) {
+        host_str = argv[1];
+        port_str = argv[2];
+    } else if (config_get("/etc/limnx.conf", "inference", "remote_host",
+                          host_buf, sizeof(host_buf)) == 0 &&
+               config_get("/etc/limnx.conf", "inference", "remote_port",
+                          port_buf, sizeof(port_buf)) == 0) {
+        host_str = host_buf;
+        port_str = port_buf;
+        printf("[proxy] Loaded config from /etc/limnx.conf: %s:%s\n",
+               host_str, port_str);
+    } else {
+        printf("Usage: inferd_proxy [-f] <host_ip> <port> [svc_name] [sock_path]\n");
+        printf("       Or set [inference] remote_host=, remote_port= in /etc/limnx.conf\n");
+        return 1;
+    }
+
+    remote_ip   = parse_ip(host_str);
+    remote_port = (uint16_t)atoi(port_str);
+    const char *svc_name  = (argc >= 4) ? argv[3] : "default";
+    const char *sock_path = (argc >= 5) ? argv[4] : "/tmp/inferd_proxy.sock";
+
     printf("[proxy] Starting: remote=%s:%s svc=%s\n",
-           argv[1], argv[2], svc_name);
+           host_str, port_str, svc_name);
 
     if (!foreground) {
         /* Daemonize: fork, parent exits, child continues in background */
@@ -306,7 +322,7 @@ int main(int argc, char **argv) {
     }
 
     printf("[proxy] Ready — forwarding '%s' to %s:%u\n",
-           svc_name, argv[1], remote_port);
+           svc_name, host_str, remote_port);
 
     sys_infer_health(0);
 

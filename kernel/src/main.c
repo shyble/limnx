@@ -899,8 +899,8 @@ void kmain(void) {
                 const char *inittab =
                     "# Init config: name:path:flags\n"
                     "# flags: respawn, once, wait\n"
-                    "serviced:/serviced.elf:respawn\n"
-                    "agentd:/agentd.elf:respawn\n"
+                    "serviced:/sbin/serviced:respawn\n"
+                    "agentd:/sbin/agentd:respawn\n"
                     "shell:/bin/ash:wait\n";
                 int len = 0;
                 while (inittab[len]) len++;
@@ -911,13 +911,38 @@ void kmain(void) {
             pr_info("Using existing /etc/inittab from disk\n");
         }
 
+        /* /etc/limnx.conf — system configuration (INI format) */
+        if (vfs_resolve_path("/etc/limnx.conf") < 0) {
+            int cfg_node = vfs_create("/etc/limnx.conf");
+            if (cfg_node >= 0) {
+                const char *conf =
+                    "# /etc/limnx.conf — Limnx system configuration\n"
+                    "\n"
+                    "[inference]\n"
+                    "# backend = local | remote\n"
+                    "backend = local\n"
+                    "# remote_host = 10.0.2.2\n"
+                    "# remote_port = 9200\n"
+                    "# model = /model.gguf\n"
+                    "\n"
+                    "[services]\n"
+                    "# Additional daemons started by init beyond /etc/inittab.\n"
+                    "# Format: name = path args\n"
+                    "# inferd_proxy = /sbin/inferd_proxy\n";
+                int len = 0;
+                while (conf[len]) len++;
+                vfs_write(cfg_node, 0, (const uint8_t *)conf, len);
+                pr_info("Created /etc/limnx.conf (first boot defaults)\n");
+            }
+        }
+
         /* /etc/passwd — user database */
         if (vfs_resolve_path("/etc/passwd") < 0) {
             int pw_node = vfs_create("/etc/passwd");
             if (pw_node >= 0) {
                 const char *passwd =
-                    "root:x:0:0:root:/:/shell.elf\n"
-                    "nobody:x:65534:65534:nobody:/:/shell.elf\n";
+                    "root:x:0:0:root:/:/bin/ash\n"
+                    "nobody:x:65534:65534:nobody:/:/bin/ash\n";
                 int len = 0;
                 while (passwd[len]) len++;
                 vfs_write(pw_node, 0, (const uint8_t *)passwd, len);
@@ -977,7 +1002,7 @@ void kmain(void) {
     /* Create /bin with busybox symlinks for standard commands */
     vfs_mkdir("/bin");
     {
-        const char *applets[] = {
+        static const char *applets[] = {
             /* shell */
             "vi", "ash", "sh", "ed",
             /* text processing */
@@ -1028,6 +1053,44 @@ void kmain(void) {
         }
         arch_memory_barrier();  /* ensure symlinks visible on all CPUs before init */
         pr_info("Created /bin with %d busybox symlinks\n", 47);
+    }
+
+    /* Create /sbin with symlinks to Limnx-specific daemons and tools.
+     * Initrd flattens all .elfs to root (tar parser uses basename), so we
+     * expose them under /sbin/<name> via symlinks for Linux-conventional paths. */
+    vfs_mkdir("/sbin");
+    {
+        static const char *sbin_tools[] = {
+            "init", "serviced", "agentd", "inferd", "inferd_proxy",
+            "orchestrator", "llmchat", "toolagent", "agent", "agentrt",
+            "worker", "multiagent", "netagent", "chat", "generate",
+            "learn", "infer", "login", "crasher", "agent_worker",
+            "file_reader", "code_executor", "tool_demo", "wasm_runner",
+            "shell", "hello",
+            NULL
+        };
+        int n_sbin = 0;
+        for (int i = 0; sbin_tools[i]; i++) {
+            char link_path[64], target[64];
+            int p = 0;
+            const char *pfx = "/sbin/";
+            while (*pfx) link_path[p++] = *pfx++;
+            const char *a = sbin_tools[i];
+            while (*a) link_path[p++] = *a++;
+            link_path[p] = '\0';
+
+            int t = 0;
+            target[t++] = '/';
+            a = sbin_tools[i];
+            while (*a) target[t++] = *a++;
+            target[t++] = '.'; target[t++] = 'e'; target[t++] = 'l'; target[t++] = 'f';
+            target[t] = '\0';
+
+            vfs_symlink(link_path, target);
+            n_sbin++;
+        }
+        arch_memory_barrier();
+        pr_info("Created /sbin with %d symlinks\n", n_sbin);
     }
 
     /* Ensure all VFS/config changes are visible on all CPUs before init */

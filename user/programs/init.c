@@ -71,6 +71,37 @@ static int parse_line(const char *line) {
     return 0;
 }
 
+/* Append a service from a [services] entry in /etc/limnx.conf.
+ * name is the key, path is the value (e.g. "/sbin/inferd_proxy"). */
+static void add_conf_service(const char *name, const char *path) {
+    if (service_count >= MAX_SERVICES) return;
+    /* Skip if name already registered via inittab — inittab takes precedence */
+    for (int i = 0; i < service_count; i++) {
+        if (strcmp(services[i].name, name) == 0) return;
+    }
+    service_t *svc = &services[service_count];
+    memset(svc, 0, sizeof(*svc));
+    int i = 0;
+    while (name[i] && i < 31) { svc->name[i] = name[i]; i++; }
+    svc->name[i] = '\0';
+    i = 0;
+    while (path[i] && i < 127) { svc->path[i] = path[i]; i++; }
+    svc->path[i] = '\0';
+    svc->flags = SVC_RESPAWN;
+    service_count++;
+}
+
+/* Read [services] section from /etc/limnx.conf, register each as respawn. */
+static void read_limnx_conf(void) {
+    char key[32], value[128];
+    int state = 0;
+    while (config_iter_section("/etc/limnx.conf", "services", &state,
+                                key, sizeof(key), value, sizeof(value)) == 0) {
+        if (key[0] && value[0])
+            add_conf_service(key, value);
+    }
+}
+
 /* Read and parse /etc/inittab */
 static int read_inittab(void) {
     long fd = sys_open("/etc/inittab", 0);
@@ -150,7 +181,32 @@ static long spawn_service(service_t *svc) {
         parse_argv(svc->path, argv, 8, argv_buf, sizeof(argv_buf));
 
         sys_execve(argv[0], argv);
-        /* execve failed — write to serial since stdout may be /dev/null */
+
+        /* Fallback: if path is bare ("serviced") or refers to root .elf
+         * ("/serviced.elf") that no longer exists, try /sbin/<basename>. */
+        const char *orig = argv[0];
+        const char *base = orig;
+        for (const char *p = orig; *p; p++)
+            if (*p == '/') base = p + 1;
+        /* Strip .elf suffix if present */
+        char name_buf[64];
+        int nlen = 0;
+        while (base[nlen] && nlen < 60) { name_buf[nlen] = base[nlen]; nlen++; }
+        name_buf[nlen] = '\0';
+        if (nlen >= 4 && name_buf[nlen-4] == '.' && name_buf[nlen-3] == 'e' &&
+            name_buf[nlen-2] == 'l' && name_buf[nlen-1] == 'f') {
+            name_buf[nlen-4] = '\0';
+        }
+        char sbin_path[80];
+        sbin_path[0] = '/'; sbin_path[1] = 's'; sbin_path[2] = 'b';
+        sbin_path[3] = 'i'; sbin_path[4] = 'n'; sbin_path[5] = '/';
+        int sp = 6;
+        for (int i = 0; name_buf[i] && sp < 78; i++) sbin_path[sp++] = name_buf[i];
+        sbin_path[sp] = '\0';
+        argv[0] = sbin_path;
+        sys_execve(argv[0], argv);
+
+        /* All exec attempts failed */
         sys_write("[init] exec failed: ", 20);
         sys_write(svc->path, strlen(svc->path));
         sys_write("\n", 1);
@@ -176,18 +232,20 @@ int main(void) {
     printf("[init] Limnx init (pid %ld)\n", sys_getpid());
 
     /* Set up environment */
-    sys_setenv("LIMNX_VERSION", "1.10");
-    sys_setenv("PATH", "/bin");
+    sys_setenv("LIMNX_VERSION", "1.27");
+    sys_setenv("PATH", "/sbin:/bin");
 
-    /* Read config */
-    if (read_inittab() < 0) {
+    /* Read config — /etc/inittab is authoritative, /etc/limnx.conf adds extras */
+    int inittab_ok = (read_inittab() == 0);
+    read_limnx_conf();
+    if (!inittab_ok) {
         /* No inittab — use hardcoded defaults */
         service_t *svc;
 
         svc = &services[service_count++];
         memset(svc, 0, sizeof(*svc));
         strcpy(svc->name, "serviced");
-        strcpy(svc->path, "/serviced.elf");
+        strcpy(svc->path, "/sbin/serviced");
         svc->flags = SVC_RESPAWN;
 
         svc = &services[service_count++];

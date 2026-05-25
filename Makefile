@@ -80,12 +80,15 @@ LIBC_C_SRCS   := user/libc/start.c user/libc/syscalls.c \
                  user/libc/vecstore.c user/libc/agent.c user/libc/transformer.c \
                  user/libc/tokenizer.c user/libc/gguf.c user/libc/dequant.c \
                  user/libc/http.c user/libc/tooldispatch.c user/libc/malloc.c \
-                 user/libc/fio.c user/libc/wasm.c user/libc/accel.c
+                 user/libc/fio.c user/libc/wasm.c user/libc/accel.c \
+                 user/libc/config.c
 LIBC_C_OBJS   := $(patsubst user/libc/%.c,build/user/libc/%.o,$(LIBC_C_SRCS))
 LIBC_OBJS     := $(LIBC_C_OBJS)
 
 # User-space C ELF programs (linked with libc)
-# Programs, agents, daemons
+# Limnx-specific daemons and tools. Standard Unix coreutils (echo, ls, cat,
+# cp, mv, rm, mkdir, ps, kill, wc, head, tail, grep, chmod, chown, env, mount,
+# umount, whoami) are provided by busybox via /bin/<name> symlinks.
 USER_C_PROGRAMS := build/user/programs/shell.elf build/user/programs/agent.elf \
                    build/user/programs/agentrt.elf build/user/programs/toolagent.elf \
                    build/user/programs/chat.elf build/user/programs/generate.elf \
@@ -96,26 +99,7 @@ USER_C_PROGRAMS := build/user/programs/shell.elf build/user/programs/agent.elf \
                    build/user/programs/serviced.elf \
                    build/user/programs/hello.elf \
                    build/user/programs/init.elf \
-                   build/user/programs/echo.elf \
-                   build/user/programs/ls.elf \
-                   build/user/programs/cat.elf \
-                   build/user/programs/cp.elf \
-                   build/user/programs/mv.elf \
-                   build/user/programs/rm.elf \
-                   build/user/programs/mkdircmd.elf \
-                   build/user/programs/ps.elf \
-                   build/user/programs/killcmd.elf \
-                   build/user/programs/wc.elf \
-                   build/user/programs/head.elf \
-                   build/user/programs/tail.elf \
-                   build/user/programs/grep.elf \
-                   build/user/programs/chmodcmd.elf \
-                   build/user/programs/chowncmd.elf \
-                   build/user/programs/env.elf \
                    build/user/programs/login.elf \
-                   build/user/programs/whoami.elf \
-                   build/user/programs/mountcmd.elf \
-                   build/user/programs/umount.elf \
                    build/user/programs/orchestrator.elf \
                    build/user/programs/agent_worker.elf \
                    build/user/programs/agentd.elf \
@@ -397,31 +381,12 @@ ARM64_USER_CFLAGS := -ffreestanding -nostdinc -isystem $(shell $(ARM64_CC) -prin
 # ARM64 user libc objects
 ARM64_LIBC_C_OBJS := $(patsubst user/libc/%.c,build/arm64/user/libc/%.o,$(LIBC_C_SRCS))
 
-# ARM64 user programs
+# ARM64 user programs — same Limnx-specific set as x86_64; coreutils via busybox.
 ARM64_USER_C_PROGRAMS := build/arm64/user/programs/shell.elf \
                           build/arm64/user/programs/serviced.elf \
                           build/arm64/user/programs/hello.elf \
                           build/arm64/user/programs/init.elf \
-                          build/arm64/user/programs/echo.elf \
-                          build/arm64/user/programs/ls.elf \
-                          build/arm64/user/programs/cat.elf \
-                          build/arm64/user/programs/cp.elf \
-                          build/arm64/user/programs/mv.elf \
-                          build/arm64/user/programs/rm.elf \
-                          build/arm64/user/programs/mkdircmd.elf \
-                          build/arm64/user/programs/ps.elf \
-                          build/arm64/user/programs/killcmd.elf \
-                          build/arm64/user/programs/wc.elf \
-                          build/arm64/user/programs/head.elf \
-                          build/arm64/user/programs/tail.elf \
-                          build/arm64/user/programs/grep.elf \
-                          build/arm64/user/programs/chmodcmd.elf \
-                          build/arm64/user/programs/chowncmd.elf \
-                          build/arm64/user/programs/env.elf \
                           build/arm64/user/programs/login.elf \
-                          build/arm64/user/programs/whoami.elf \
-                          build/arm64/user/programs/mountcmd.elf \
-                          build/arm64/user/programs/umount.elf \
                           build/arm64/user/programs/orchestrator.elf \
                           build/arm64/user/programs/agent_worker.elf \
                           build/arm64/user/programs/agentd.elf \

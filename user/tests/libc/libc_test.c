@@ -60,11 +60,59 @@ static void test_atoi(void) {
     lt_ok(strtoul("ff", (void *)0, 16) == 255, "strtoul hex");
 }
 
+static void test_config_parser(void) {
+    /* Write a sample config file */
+    const char *path = "/tmp/test_config.ini";
+    long fd = sys_create(path);
+    if (fd < 0) { lt_ok(0, "config: create test file"); return; }
+    const char *content =
+        "# Sample config\n"
+        "[inference]\n"
+        "backend = remote\n"
+        "remote_host = 10.0.2.2\n"
+        "remote_port = 9200\n"
+        "\n"
+        "[services]\n"
+        "inferd_proxy = /sbin/inferd_proxy\n"
+        "extra = /sbin/extra arg1 arg2\n";
+    int len = 0;
+    while (content[len]) len++;
+    sys_fwrite(fd, content, len);
+    sys_close(fd);
+
+    char buf[64];
+    lt_ok(config_get(path, "inference", "backend", buf, sizeof(buf)) == 0 &&
+          strcmp(buf, "remote") == 0,
+          "config_get [inference] backend == remote");
+    lt_ok(config_get(path, "inference", "remote_host", buf, sizeof(buf)) == 0 &&
+          strcmp(buf, "10.0.2.2") == 0,
+          "config_get [inference] remote_host");
+    lt_ok(config_get_int(path, "inference", "remote_port", -1) == 9200,
+          "config_get_int [inference] remote_port == 9200");
+    lt_ok(config_get(path, "missing", "backend", buf, sizeof(buf)) < 0,
+          "config_get unknown section returns -1");
+    lt_ok(config_get(path, "inference", "missing_key", buf, sizeof(buf)) < 0,
+          "config_get unknown key returns -1");
+
+    /* Iterate [services] */
+    char key[32], value[128];
+    int state = 0;
+    int count = 0;
+    while (config_iter_section(path, "services", &state, key, sizeof(key),
+                                value, sizeof(value)) == 0) {
+        count++;
+    }
+    lt_ok(count == 2, "config_iter_section [services] returns 2 entries");
+
+    sys_unlink(path);
+}
+
 int main(void) {
     lt_suite("libc");
     test_malloc_free();
     test_string_functions();
     test_math();
     test_atoi();
+    test_config_parser();
     return lt_done();
 }

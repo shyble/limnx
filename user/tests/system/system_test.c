@@ -1,71 +1,111 @@
 /*
  * system_test.c — System-level integration tests
- * Tests: init, coreutils, shell, env, login
+ * Tests: init, /sbin layout, busybox /bin layout, /etc configs, env
  * Portable — no arch-specific code.
  */
 #include "../limntest.h"
 
-static void test_init(void) {
-    long fd = sys_open("/etc/inittab", 0);
-    lt_ok(fd >= 0, "/etc/inittab exists");
-    if (fd >= 0) sys_close(fd);
+static int file_exists(const char *path) {
+    long fd = sys_open(path, 0);
+    if (fd < 0) return 0;
+    sys_close(fd);
+    return 1;
+}
 
-    fd = sys_open("/proc/1/status", 0);
-    lt_ok(fd >= 0, "init (pid 1) in /proc");
-    if (fd >= 0) sys_close(fd);
+static void test_init(void) {
+    lt_ok(file_exists("/etc/inittab"), "/etc/inittab exists");
+    lt_ok(file_exists("/proc/1/status"), "init (pid 1) /proc status");
+    lt_ok(file_exists("/proc/1/stat"), "init (pid 1) /proc stat (busybox ps)");
+    lt_ok(file_exists("/proc/1/cmdline"), "init (pid 1) /proc cmdline");
 }
 
 static void test_env(void) {
     char val[64];
     long ret = sys_getenv("LIMNX_VERSION", val, 64);
     lt_ok(ret >= 0, "LIMNX_VERSION env set");
-    if (ret >= 0) {
-        lt_ok(val[0] != '\0', "version is non-empty");
-    } else {
-        lt_ok(0, "version is non-empty");
-    }
+    if (ret >= 0)
+        lt_ok(val[0] != '\0', "LIMNX_VERSION is non-empty");
+    else
+        lt_ok(0, "LIMNX_VERSION is non-empty");
+
+    ret = sys_getenv("PATH", val, 64);
+    lt_ok(ret >= 0, "PATH env set");
+    if (ret >= 0)
+        lt_ok(strstr(val, "/sbin") != NULL || strstr(val, "/bin") != NULL,
+              "PATH contains /sbin or /bin");
+    else
+        lt_ok(0, "PATH contains /sbin or /bin");
 }
 
-static void test_coreutils_exist(void) {
-    const char *progs[] = {
-        "/echo.elf", "/ls.elf", "/cat.elf", "/cp.elf", "/mv.elf",
-        "/rm.elf", "/ps.elf", "/killcmd.elf", "/grep.elf",
-        "/head.elf", "/tail.elf", "/wc.elf", "/env.elf",
-        (void *)0
+static void test_sbin_symlinks(void) {
+    /* /sbin/ should contain symlinks to Limnx daemons */
+    const char *sbin_tools[] = {
+        "/sbin/init", "/sbin/serviced", "/sbin/agentd", "/sbin/inferd",
+        "/sbin/inferd_proxy", "/sbin/shell", "/sbin/login",
+        NULL
     };
     int all = 1;
-    for (int i = 0; progs[i]; i++) {
-        long fd = sys_open(progs[i], 0);
-        if (fd < 0) all = 0;
-        else sys_close(fd);
+    for (int i = 0; sbin_tools[i]; i++) {
+        if (!file_exists(sbin_tools[i])) all = 0;
     }
-    lt_ok(all, "all coreutils in initrd");
+    lt_ok(all, "/sbin/ symlinks resolve");
 }
 
-static void test_echo_exec(void) {
+static void test_bin_busybox(void) {
+    /* /bin/ should contain busybox applet symlinks */
+    const char *bin_apps[] = {
+        "/bin/ash", "/bin/ls", "/bin/cat", "/bin/echo", "/bin/grep",
+        "/bin/ps", "/bin/wc", "/bin/cp", "/bin/mv", "/bin/rm",
+        NULL
+    };
+    int all = 1;
+    for (int i = 0; bin_apps[i]; i++) {
+        if (!file_exists(bin_apps[i])) all = 0;
+    }
+    lt_ok(all, "/bin/ busybox applets resolve");
+}
+
+static void test_no_redundant_coreutils(void) {
+    /* These C coreutils were removed in Stage 1.27 — busybox provides them
+     * via /bin/. The ASM demo cat.elf (user/asm/cat.asm) stays as legacy
+     * educational code and is intentionally NOT listed here. */
+    const char *gone[] = {
+        "/echo.elf", "/ls.elf", "/cp.elf", "/mv.elf", "/rm.elf",
+        "/ps.elf", "/grep.elf", "/head.elf", "/tail.elf", "/wc.elf",
+        "/env.elf", "/whoami.elf", "/killcmd.elf", "/mkdircmd.elf",
+        "/chmodcmd.elf", "/chowncmd.elf", "/mountcmd.elf", "/umount.elf",
+        NULL
+    };
+    int any_present = 0;
+    for (int i = 0; gone[i]; i++) {
+        if (file_exists(gone[i])) any_present = 1;
+    }
+    lt_ok(!any_present, "redundant C coreutils removed (busybox wins)");
+}
+
+static void test_limnx_conf(void) {
+    lt_ok(file_exists("/etc/limnx.conf"), "/etc/limnx.conf exists");
+    /* Parse [inference] backend value */
+    char val[64];
+    int ret = config_get("/etc/limnx.conf", "inference", "backend", val, sizeof(val));
+    lt_ok(ret == 0, "config_get [inference] backend");
+    if (ret == 0)
+        lt_ok(val[0] != '\0', "[inference] backend has value");
+    else
+        lt_ok(0, "[inference] backend has value");
+}
+
+static void test_bin_exec(void) {
+    /* Busybox echo via /bin/ash -c 'echo' would need a shell parser;
+     * just verify direct exec of /bin/echo (symlink to busybox) runs. */
     long child = sys_fork();
     if (child == 0) {
-        const char *argv[] = {"echo.elf", "test", (void *)0};
-        sys_execve("/echo.elf", argv);
+        const char *argv[] = {"echo", "ok", NULL};
+        sys_execve("/bin/echo", argv);
         sys_exit(127);
     }
     long st = sys_waitpid(child);
-    lt_ok(st == 0, "echo.elf executes");
-}
-
-static void test_login_whoami(void) {
-    long fd = sys_open("/login.elf", 0);
-    lt_ok(fd >= 0, "login.elf exists");
-    if (fd >= 0) sys_close(fd);
-
-    long child = sys_fork();
-    if (child == 0) {
-        const char *argv[] = {"whoami.elf", (void *)0};
-        sys_execve("/whoami.elf", argv);
-        sys_exit(127);
-    }
-    long st = sys_waitpid(child);
-    lt_ok(st == 0, "whoami.elf executes");
+    lt_ok(st == 0, "/bin/echo executes");
 }
 
 static void test_exit_status(void) {
@@ -84,35 +124,20 @@ static void test_env_setget(void) {
     sys_setenv("TEST_KEY", "test_value");
     char val[64];
     long ret = sys_getenv("TEST_KEY", val, 64);
-    lt_ok(ret >= 0 && strcmp(val, "test_value") == 0, "setenv+getenv roundtrip");
-}
-
-static void test_coreutils_exec(void) {
-    /* Test that ls, ps, grep actually execute */
-    const char *tests[][2] = {
-        {"ls.elf", "/ls.elf"},
-        {"ps.elf", "/ps.elf"},
-        {"grep.elf", "/grep.elf"},
-        {(void *)0, (void *)0}
-    };
-    for (int i = 0; tests[i][0]; i++) {
-        long fd = sys_open(tests[i][1], 0);
-        if (fd >= 0) sys_close(fd);
-        /* Just check they exist — executing them with proper args
-         * is already validated by the subsystem tests */
-    }
-    lt_ok(1, "coreutils binaries accessible");
+    lt_ok(ret >= 0 && strcmp(val, "test_value") == 0,
+          "setenv+getenv roundtrip");
 }
 
 int main(void) {
     lt_suite("system");
     test_init();
     test_env();
-    test_coreutils_exist();
-    test_echo_exec();
-    test_login_whoami();
+    test_sbin_symlinks();
+    test_bin_busybox();
+    test_no_redundant_coreutils();
+    test_limnx_conf();
+    test_bin_exec();
     test_exit_status();
     test_env_setget();
-    test_coreutils_exec();
     return lt_done();
 }

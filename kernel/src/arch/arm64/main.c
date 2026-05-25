@@ -361,9 +361,9 @@ void kmain(uint64_t dtb_addr) {
         if (tab_node >= 0) {
             const char *inittab =
                 "# Init config: name:path:flags\n"
-                "serviced:/serviced.elf:respawn\n"
-                "inferd:/inferd.elf:respawn\n"
-                "agentd:/agentd.elf:respawn\n"
+                "serviced:/sbin/serviced:respawn\n"
+                "inferd:/sbin/inferd:respawn\n"
+                "agentd:/sbin/agentd:respawn\n"
                 "shell:/bin/ash:wait\n";
             int len = 0;
             while (inittab[len]) len++;
@@ -371,11 +371,32 @@ void kmain(uint64_t dtb_addr) {
             pr_info("Created /etc/inittab\n");
         }
 
+        int cfg_node = vfs_create("/etc/limnx.conf");
+        if (cfg_node >= 0) {
+            const char *conf =
+                "# /etc/limnx.conf — Limnx system configuration\n"
+                "\n"
+                "[inference]\n"
+                "# backend = local | remote\n"
+                "backend = local\n"
+                "# remote_host = 10.0.2.2\n"
+                "# remote_port = 9200\n"
+                "\n"
+                "[services]\n"
+                "# Additional daemons started by init beyond /etc/inittab.\n"
+                "# Format: name = path args\n"
+                "# inferd_proxy = /sbin/inferd_proxy\n";
+            int len = 0;
+            while (conf[len]) len++;
+            vfs_write(cfg_node, 0, (const uint8_t *)conf, len);
+            pr_info("Created /etc/limnx.conf\n");
+        }
+
         int pw_node = vfs_create("/etc/passwd");
         if (pw_node >= 0) {
             const char *passwd =
-                "root:x:0:0:root:/:/shell.elf\n"
-                "nobody:x:65534:65534:nobody:/:/shell.elf\n";
+                "root:x:0:0:root:/:/bin/ash\n"
+                "nobody:x:65534:65534:nobody:/:/bin/ash\n";
             int len = 0;
             while (passwd[len]) len++;
             vfs_write(pw_node, 0, (const uint8_t *)passwd, len);
@@ -388,6 +409,7 @@ void kmain(uint64_t dtb_addr) {
     vfs_symlink("/proc/self/exe", "/busybox-arm64.elf");
 
     vfs_mkdir("/root");
+    vfs_mkdir("/tmp");
 
     /* Create agentd directories */
     vfs_mkdir("/var");
@@ -461,6 +483,40 @@ void kmain(uint64_t dtb_addr) {
             while (*a) path[p++] = *a++;
             path[p] = '\0';
             vfs_symlink(path, "/busybox-arm64.elf");
+        }
+    }
+
+    /* Create /sbin with symlinks to Limnx-specific daemons and tools.
+     * Same scheme as x86_64: initrd flattens .elfs to root, /sbin/<name>
+     * symlinks expose them under conventional paths. */
+    vfs_mkdir("/sbin");
+    {
+        static const char *sbin_tools[] = {
+            "init", "serviced", "agentd", "inferd", "inferd_proxy",
+            "orchestrator", "llmchat", "toolagent", "agent", "agentrt",
+            "worker", "multiagent", "netagent", "chat", "generate",
+            "learn", "infer", "login", "crasher", "agent_worker",
+            "file_reader", "code_executor", "tool_demo", "wasm_runner",
+            "shell", "hello",
+            NULL
+        };
+        for (int i = 0; sbin_tools[i]; i++) {
+            char link_path[64], target[64];
+            int p = 0;
+            const char *pfx = "/sbin/";
+            while (*pfx) link_path[p++] = *pfx++;
+            const char *a = sbin_tools[i];
+            while (*a) link_path[p++] = *a++;
+            link_path[p] = '\0';
+
+            int t = 0;
+            target[t++] = '/';
+            a = sbin_tools[i];
+            while (*a) target[t++] = *a++;
+            target[t++] = '.'; target[t++] = 'e'; target[t++] = 'l'; target[t++] = 'f';
+            target[t] = '\0';
+
+            vfs_symlink(link_path, target);
         }
     }
 
