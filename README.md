@@ -2,74 +2,31 @@
 
 [![Build & Test](https://github.com/limnxos/limnx/actions/workflows/build.yml/badge.svg)](https://github.com/limnxos/limnx/actions/workflows/build.yml)
 
-An operating system where AI agents are first-class citizens.
+A small, hackable Unix-like OS for x86_64 and ARM64.
 
-Limnx is a from-scratch x86_64/ARM64 kernel with built-in primitives for AI inference, agent orchestration, and security isolation. The kernel doesn't just run AI workloads — it **governs** them: routing inference requests, enforcing capability tokens, sandboxing workers with seccomp, and orchestrating multi-agent workflows through task graphs and pub/sub.
+Limnx is a from-scratch kernel + userland built for learning and tinkering. Full arch parity between x86_64 and ARM64, modern virtio drivers, busybox + musl userspace, SMP preemptive scheduling, fork/exec with COW, signals, TCP/IP, LimnFS on virtio-blk. BIOS/UEFI boot on x86_64, PSCI/FDT on ARM64, runs in QEMU.
 
 ## Try It
 
 ```bash
-# Build and boot (x86_64)
+# x86_64
 make clean && make
-make disk
-make run
+make run                        # busybox ash on COM1
 
-# In the shell:
-/orchestrator.elf     # Full AI-native demo
-/generate.elf         # Interactive text generation
-/infer_test.elf       # 49 inference pipeline tests
+# ARM64
+make arm64 && make arm64-run    # QEMU virt, PL011 serial
 ```
 
-The orchestrator demo exercises 7 kernel primitives in one command:
+## What's In It
 
-```
-=============================================
-  Limnx Agent Orchestration Demo
-=============================================
-
-Step 1: Creating namespace...          → Isolated agent group
-Step 2: Starting inference daemon...   → GGUF model loaded (dim=64, 2 layers)
-Step 3: Creating pub/sub topics...     → Task distribution + result collection
-Step 4: Creating supervisor...         → Managed worker lifecycle
-Step 5: Creating capability tokens...  → Scoped CAP_INFER bearer token
-Step 6: Adding 3 workers...            → Sandboxed with seccomp
-Step 7: Creating task graph...         → A→B→C dependency chain
-Step 8: Starting supervisor...         → Workers launch, subscribe, sandbox
-
-=== Executing Task Graph ===
-
-Task A completed ✓  (worker calls inference, publishes result)
-Task B completed ✓  (waits for A, then executes)
-Task C completed ✓  (waits for B, then executes)
-
-=== Results ===
-
-RESULT:8:1:<generated text from transformer>
-RESULT:7:2:<generated text from transformer>
-RESULT:8:3:<generated text from transformer>
-Collected 3/3 results
-
-Demo Complete
-```
-
-## What Makes It AI-Native
-
-Traditional OSes treat AI as "just another process." Limnx provides **kernel primitives** purpose-built for AI workloads:
-
-| Primitive | Syscalls | What It Does |
-|-----------|----------|-------------|
-| **Inference Service** | `infer_register`, `infer_request`, `infer_submit/poll/result` | Kernel-routed model serving with health monitoring, load balancing, result caching, async completion, model hot-swap |
-| **Agent Namespaces** | `ns_create`, `ns_join`, `ns_setquota` | Resource-isolated agent groups with process/memory quotas |
-| **Capability Tokens** | `token_create`, `token_delegate`, `token_revoke` | Fine-grained, delegated, revocable authorization (depth-4 delegation chains, cascading revocation) |
-| **Task Graphs** | `task_create`, `task_depend`, `task_start`, `task_complete` | DAG workflow orchestration with cross-namespace dependencies |
-| **Supervisor Trees** | `super_create`, `super_add`, `super_start`, `super_stop` | Erlang-style process supervision with ONE_FOR_ONE/ONE_FOR_ALL restart policies |
-| **Pub/Sub** | `topic_create`, `topic_publish`, `topic_subscribe`, `topic_recv` | Broadcast messaging across agent groups |
-| **Seccomp Sandbox** | `seccomp` | Syscall allowlist — workers can only call inference + I/O, not fork/exec/kill |
-
-The security model is a **trifecta**:
-- **Namespaces** isolate what agents can see
-- **Capability tokens** control what agents can access
-- **Seccomp** restricts how agents interact with the kernel
+| Subsystem | What |
+|-----------|------|
+| **Kernel** | 4-level paging, SMP (2 CPUs, LAPIC/GIC), preemptive scheduler, fork+exec+COW, signals, 140+ syscalls |
+| **Filesystem** | VFS, LimnFS on virtio-blk, block cache (write-back), symlinks, FIFOs, /proc, tmpfs mount, /dev |
+| **Networking** | Ethernet/ARP/IP/ICMP/UDP/TCP, virtio-net (PCI on x86, MMIO on ARM), software loopback |
+| **Userland** | Busybox (47 applets), musl libc, login, job control (SIGTSTP/SIGCONT, tcsetpgrp), shell scripting |
+| **Boot** | Limine (x86_64 BIOS+UEFI), direct boot (ARM64), FDT/DTB parser, persistent /etc/inittab |
+| **Optional services** | `inferd` (GGUF inference), `agentd` (RAG + tool dispatch), `serviced` (supervisor trees) — see [Optional Services](#optional-services) below |
 
 ## Architecture
 
@@ -89,7 +46,7 @@ The security model is a **trifecta**:
  │  fork/exec/COW  SMP preemptive  4-level PT   LimnFS/VFS  │
  │  signals        2 CPUs          swap/demand  block cache │
  │                                                          │
- │  AI Primitives                  Security                 │
+ │  Orchestration                  Security                 │
  │  infer_svc (routing/cache)      namespaces               │
  │  supervisor trees               capability tokens        │
  │  task graphs (DAG)              seccomp filters          │
@@ -108,6 +65,10 @@ The security model is a **trifecta**:
  └──────────────────────────────────────────────────────────┘
        Limine (x86_64 BIOS/UEFI)  |  Direct boot (ARM64)
 ```
+
+## Optional Services
+
+The sections below describe userspace daemons that ship with Limnx for AI/inference workloads. They're optional — the OS boots and is fully usable without them.
 
 ## Inference Pipeline
 
