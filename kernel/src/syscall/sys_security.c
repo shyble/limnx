@@ -21,12 +21,13 @@ int64_t sys_setuid(uint64_t uid_arg, uint64_t a2,
     uint16_t new_uid = (uint16_t)uid_arg;
 
     if (proc->euid == 0) {
-        /* Privileged: set all three IDs, drop caps if going non-root */
+        /* Privileged: set all three IDs, drop privileged caps if going
+         * non-root */
         proc->uid = new_uid;
         proc->euid = new_uid;
         proc->suid = new_uid;
         if (new_uid != 0)
-            proc->capabilities = 0;  /* drop all caps */
+            proc->capabilities &= CAP_BASIC;
     } else {
         /* Unprivileged: can only set euid to real uid or saved uid */
         if (new_uid != proc->uid && new_uid != proc->suid) {
@@ -113,6 +114,14 @@ int64_t sys_setcap(uint64_t pid_arg, uint64_t caps,
     process_t *target = process_lookup(pid);
     if (!target) return -ESRCH;
 
+    /* Without root, only processes running entirely as the caller's uid
+     * may be changed; otherwise CAP_SYS_ADMIN could strip or rewrite the
+     * capabilities of root or other users' processes. */
+    if (caller->euid != 0 &&
+        (target->uid != caller->euid || target->euid != caller->euid ||
+         target->suid != caller->euid))
+        return -EPERM;
+
     target->capabilities = (uint32_t)caps;
     return 0;
 }
@@ -174,20 +183,43 @@ int64_t sys_setrlimit(uint64_t resource, uint64_t ptr,
     }
 }
 
+/* seccomp(mask, strict, mask_hi, bitmap_ptr):
+ *   bitmap_ptr == 0: legacy form, mask/mask_hi allow syscalls 0-127.
+ *   bitmap_ptr != 0: user array of SECCOMP_WORDS words allowing 0-511;
+ *                    mask/mask_hi are ignored.
+ * Standard syscalls without an allow bit are denied. Limnx syscalls
+ * (>= SECCOMP_LIMNX_BASE) are not filtered. */
 int64_t sys_seccomp(uint64_t mask, uint64_t strict,
-                             uint64_t mask_hi, uint64_t a4, uint64_t a5) {
-    (void)a4; (void)a5;
+                             uint64_t mask_hi, uint64_t bitmap_ptr, uint64_t a5) {
+    (void)a5;
     thread_t *t = thread_get_current();
     if (!t || !t->process) return -1;
     process_t *proc = t->process;
 
-    if (proc->seccomp_mask != 0 || proc->seccomp_mask_hi != 0) {
-        proc->seccomp_mask &= mask;
-        proc->seccomp_mask_hi &= mask_hi;
+    uint64_t bits[SECCOMP_WORDS];
+    for (int i = 0; i < SECCOMP_WORDS; i++)
+        bits[i] = 0;
+    if (bitmap_ptr) {
+        if (validate_user_ptr(bitmap_ptr, sizeof(bits)) != 0)
+            return -EFAULT;
+        const uint64_t *ubits = (const uint64_t *)bitmap_ptr;
+        for (int i = 0; i < SECCOMP_WORDS; i++)
+            bits[i] = ubits[i];
     } else {
-        proc->seccomp_mask = mask;
-        proc->seccomp_mask_hi = mask_hi;
+        bits[0] = mask;
+        bits[1] = mask_hi;
     }
+
+    /* A filter can only ever be narrowed. An explicit active flag is used
+     * because an all-zero bitmap is a valid (deny-everything) filter, not
+     * "no filter". */
+    for (int i = 0; i < SECCOMP_WORDS; i++) {
+        if (proc->seccomp_active)
+            proc->seccomp_bits[i] &= bits[i];
+        else
+            proc->seccomp_bits[i] = bits[i];
+    }
+    proc->seccomp_active = 1;
     if (strict)
         proc->seccomp_strict = 1;
     return 0;

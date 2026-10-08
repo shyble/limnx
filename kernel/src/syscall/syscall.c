@@ -102,28 +102,67 @@ int fd_is_free(const fd_entry_t *e) {
 /* --- Permission helper --- */
 
 /* Check if process belongs to a group (primary or supplementary) */
-static int process_in_group(const process_t *proc, uint16_t gid) {
-    if (proc->egid == gid) return 1;
+static int process_in_group(const process_t *proc, uint16_t primary_gid,
+                            uint16_t gid) {
+    if (primary_gid == gid) return 1;
     for (int i = 0; i < proc->ngroups && i < MAX_SUPPL_GROUPS; i++) {
         if (proc->groups[i] == gid) return 1;
     }
     return 0;
 }
 
-int check_file_perm(const process_t *proc, const vfs_node_t *node, uint8_t access) {
-    if (proc->euid == 0) return 0;  /* root bypasses */
+/* Check rwx access to a node. mask is a combination of VFS_PERM_READ,
+ * VFS_PERM_WRITE and VFS_PERM_EXEC. Root bypasses read/write checks but,
+ * as on Unix, may only execute a file that has at least one x bit set. */
+static int node_access_for(const process_t *proc, uint16_t uid, uint16_t gid,
+                           const vfs_node_t *node, int mask) {
+    if (uid == 0) {
+        if ((mask & VFS_PERM_EXEC) && node->type != VFS_DIRECTORY &&
+            !(node->mode & 0111))
+            return -EACCES;
+        return 0;
+    }
     uint16_t perm_bits;
-    if (proc->euid == node->uid)
+    if (uid == node->uid)
         perm_bits = (node->mode >> 6) & 7;
-    else if (process_in_group(proc, node->gid))
+    else if (process_in_group(proc, gid, node->gid))
         perm_bits = (node->mode >> 3) & 7;
     else
         perm_bits = node->mode & 7;
-    if ((access == O_RDONLY || access == O_RDWR) && !(perm_bits & 4))
-        return -EACCES;
-    if ((access == O_WRONLY || access == O_RDWR) && !(perm_bits & 2))
+    if ((perm_bits & mask) != mask)
         return -EACCES;
     return 0;
+}
+
+int check_node_access(const process_t *proc, const vfs_node_t *node, int mask) {
+    return node_access_for(proc, proc->euid, proc->egid, node, mask);
+}
+
+/* Same check using the real ids, as access(2) requires. */
+int check_node_access_real(const process_t *proc, const vfs_node_t *node, int mask) {
+    return node_access_for(proc, proc->uid, proc->gid, node, mask);
+}
+
+int check_file_perm(const process_t *proc, const vfs_node_t *node, uint8_t access) {
+    int mask = 0;
+    if (access == O_RDONLY || access == O_RDWR)
+        mask |= VFS_PERM_READ;
+    if (access == O_WRONLY || access == O_RDWR)
+        mask |= VFS_PERM_WRITE;
+    return check_node_access(proc, node, mask);
+}
+
+/* Check write permission on the directory that contains path. */
+int check_parent_write(const process_t *proc, const char *path) {
+    char parent_path[MAX_PATH], base_name[MAX_PATH];
+    vfs_path_split(path, parent_path, base_name);
+    int parent_idx = vfs_resolve_path(parent_path);
+    if (parent_idx < 0)
+        return -ENOENT;
+    vfs_node_t *parent_node = vfs_get_node(parent_idx);
+    if (!parent_node)
+        return -ENOENT;
+    return check_node_access(proc, parent_node, VFS_PERM_WRITE);
 }
 
 /* Count open fds for a process */
@@ -387,23 +426,25 @@ int64_t syscall_dispatch(uint64_t num, uint64_t arg1, uint64_t arg2,
         return -ENOSYS;
     }
 
-    /* Seccomp filtering — bitmask covers syscalls 0-127.
-     * Syscalls >= 128 (including Limnx custom 512+) are allowed if
-     * any seccomp mask bit is set (we don't have enough bits for all). */
+    /* Seccomp filtering: while a filter is active, standard syscalls
+     * (< SECCOMP_LIMNX_BASE) need an allow bit. sys_seccomp itself only ever
+     * narrows the filter. Limnx-specific syscalls are not filtered so
+     * sandboxed services can keep using IPC; any process they create
+     * inherits the filter. */
     thread_t *st = thread_get_current();
-    if (st && st->process &&
-        (st->process->seccomp_mask != 0 || st->process->seccomp_mask_hi != 0) &&
-        num != SYS_EXIT && num != SYS_RT_SIGRETURN) {
+    if (st && st->process && st->process->seccomp_active &&
+        num != SYS_EXIT && num != SYS_EXIT_GROUP && num != SYS_RT_SIGRETURN) {
         int allowed = 1;
-        if (num < 64)
-            allowed = !!(st->process->seccomp_mask & (1ULL << num));
-        else if (num < 128)
-            allowed = !!(st->process->seccomp_mask_hi & (1ULL << (num - 64)));
-        /* num >= 128: allowed by default (can't bitmap-filter high numbers) */
+        if (num < SECCOMP_LIMNX_BASE)
+            allowed = !!(st->process->seccomp_bits[num / 64] & (1ULL << (num % 64)));
         if (!allowed) {
             if (st->process->seccomp_strict) {
-                process_deliver_signal(st->process, SIGKILL);
-                return -EACCES;
+                /* Terminate now: SIGKILL on the running thread would only
+                 * take effect at the next reschedule, letting the process
+                 * keep executing after the denied call. */
+                serial_printf("[proc] Process %lu killed by seccomp (syscall %lu)\n",
+                              st->process->pid, num);
+                sys_exit((uint64_t)(128 + SIGKILL), 0, 0, 0, 0);
             }
             return -EACCES;
         }

@@ -546,8 +546,7 @@ int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr,
 
 int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr,
                                uint64_t mode, uint64_t flags, uint64_t a5) {
-    (void)dirfd; (void)mode; (void)flags; (void)a5;
-    /* access check: just verify file exists */
+    (void)dirfd; (void)flags; (void)a5;
     char raw_path[MAX_PATH], path[MAX_PATH];
     if (copy_string_from_user((const char *)path_ptr, raw_path, MAX_PATH) != 0)
         return -EFAULT;
@@ -556,7 +555,16 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr,
     if (!proc) return -1;
     resolve_user_path(proc, raw_path, path);
     int idx = vfs_resolve_path(path);
-    return idx >= 0 ? 0 : -ENOENT;
+    if (idx < 0)
+        return -ENOENT;
+    /* F_OK (0) only checks existence; R_OK/W_OK/X_OK map to rwx bits */
+    int mask = (int)(mode & (VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC));
+    if (mask == 0)
+        return 0;
+    vfs_node_t *node = vfs_get_node(idx);
+    if (!node)
+        return -ENOENT;
+    return check_node_access_real(proc, node, mask);
 }
 
 int64_t sys_stat(uint64_t path_ptr, uint64_t stat_ptr,
@@ -963,7 +971,13 @@ int64_t sys_truncate(uint64_t path_ptr, uint64_t new_size,
 
     int node_idx = vfs_resolve_path(path);
     if (node_idx < 0)
-        return -1;
+        return -ENOENT;
+
+    vfs_node_t *node = vfs_get_node(node_idx);
+    if (!node)
+        return -ENOENT;
+    if (check_node_access(proc, node, VFS_PERM_WRITE) != 0)
+        return -EACCES;
 
     return vfs_truncate_node(node_idx, new_size);
 }
@@ -1091,6 +1105,14 @@ int64_t sys_rename(uint64_t old_path_ptr, uint64_t new_path_ptr,
     if (!(proc->capabilities & CAP_FS_WRITE) &&
         !cap_token_check(proc->pid, CAP_FS_WRITE, old_path))
         return -EACCES;
+
+    /* Renaming needs write access to both directories involved */
+    int perm = check_parent_write(proc, old_path);
+    if (perm != 0)
+        return perm;
+    perm = check_parent_write(proc, new_path);
+    if (perm != 0)
+        return perm;
 
     return vfs_rename(old_path, new_path);
 }

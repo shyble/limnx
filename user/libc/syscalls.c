@@ -40,6 +40,10 @@ long sys_open(const char *path, unsigned long flags) {
 #endif
 }
 
+long sys_access(const char *path, long mode) {
+    return __syscall4(SYS_FACCESSAT, AT_FDCWD, (long)path, mode, 0);
+}
+
 long sys_read(long fd, void *buf, unsigned long len) {
     return __syscall3(SYS_READ, fd, (long)buf, (long)len);
 }
@@ -356,6 +360,10 @@ long sys_setrlimit(long resource, const void *rlimit_ptr) {
 
 long sys_seccomp(unsigned long mask, long strict, unsigned long mask_hi) {
     return __syscall3(SYS_SECCOMP, (long)mask, strict, (long)mask_hi);
+}
+
+long sys_seccomp_filter(const unsigned long *bits, long strict) {
+    return __syscall4(SYS_SECCOMP, 0, strict, 0, (long)bits);
 }
 
 long sys_setaudit(long pid, long flags) {

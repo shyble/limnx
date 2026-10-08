@@ -5,6 +5,11 @@
 #include "sched/thread.h"
 #include "fs/vfs.h"
 
+/* Seccomp allowlist covers the standard (Linux-numbered) syscalls 0-511.
+ * Limnx-specific syscalls start at SECCOMP_LIMNX_BASE. */
+#define SECCOMP_LIMNX_BASE 512
+#define SECCOMP_WORDS      (SECCOMP_LIMNX_BASE / 64)
+
 /* Signal numbers (Linux-compatible) */
 #define SIGINT   2
 #define SIGKILL  9
@@ -106,9 +111,9 @@ typedef struct process {
     uint64_t      rlimit_cpu_ticks;  /* max CPU ticks, 0=unlimited */
     uint32_t      rlimit_nfds;       /* max open fds, 0=unlimited */
     uint64_t      used_mem_pages;    /* current mmap page count */
-    uint64_t      seccomp_mask;    /* bit N set = syscall N allowed (0-63) */
-    uint64_t      seccomp_mask_hi; /* bit N set = syscall N+64 allowed (64-127) */
+    uint64_t      seccomp_bits[SECCOMP_WORDS]; /* bit N set = syscall N allowed (N < 512) */
     uint8_t       seccomp_strict;  /* 1=SIGKILL on denied, 0=return -EACCES */
+    uint8_t       seccomp_active;  /* filter installed; never cleared once set */
     uint8_t       audit_flags;     /* AUDIT_* flags */
     int64_t       exit_status;
     volatile uint8_t exited;      /* set to 1 by sys_exit, safe to check after thread freed */
@@ -152,9 +157,12 @@ typedef struct process {
 
 /* Signal delivery — returns 0 on success */
 int process_deliver_signal(process_t *proc, int signum);
+void process_seccomp_inherit(process_t *child, const process_t *parent);
 
 /* Kill all processes in a process group */
 int process_kill_group(uint64_t pgid, int signum);
+int process_kill_group_from(const process_t *sender, uint64_t pgid, int signum);
+int process_may_signal(const process_t *sender, const process_t *target);
 
 process_t *process_create(const uint8_t *code, uint64_t code_size);
 process_t *process_create_from_elf(const uint8_t *elf, uint64_t size);

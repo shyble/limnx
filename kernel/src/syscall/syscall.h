@@ -22,6 +22,9 @@
 #define CAP_XNS_INFER  (1 << 11)
 #define CAP_CHOWN      (1 << 12)
 #define CAP_ALL       0x1FFF
+/* Capabilities an ordinary user keeps: access is then governed by file
+ * permissions. Everything else is dropped when root switches to a user. */
+#define CAP_BASIC     (CAP_EXEC | CAP_FS_READ | CAP_FS_WRITE)
 
 /* Resource limits */
 #define RLIMIT_MEM   0

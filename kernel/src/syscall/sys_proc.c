@@ -178,8 +178,8 @@ int64_t sys_exec(uint64_t path_ptr, uint64_t argv_ptr,
 
     /* Check exec permission */
     vfs_node_t *exec_node = vfs_get_node(node_idx);
-    if (exec_node && !(exec_node->mode & VFS_PERM_EXEC))
-        return -1;
+    if (exec_node && check_node_access(proc, exec_node, VFS_PERM_EXEC) != 0)
+        return -EACCES;
 
     /* Capture setuid/setgid bits before we lose exec_node access */
     uint16_t exec_mode = exec_node ? exec_node->mode : 0;
@@ -378,7 +378,7 @@ int64_t sys_execve(uint64_t path_ptr, uint64_t argv_ptr,
         return -ENOENT;
 
     vfs_node_t *exec_node = vfs_get_node(node_idx);
-    if (exec_node && !(exec_node->mode & VFS_PERM_EXEC))
+    if (exec_node && check_node_access(proc, exec_node, VFS_PERM_EXEC) != 0)
         return -EACCES;
 
     /* Capture setuid/setgid bits before we lose exec_node access */
@@ -578,10 +578,8 @@ int64_t sys_execve(uint64_t path_ptr, uint64_t argv_ptr,
         proc->sgid = exec_gid;
     }
 
-    /* Reset security state */
-    proc->seccomp_mask = 0;
-    proc->seccomp_mask_hi = 0;
-    proc->seccomp_strict = 0;
+    /* The seccomp filter deliberately survives exec: otherwise a sandboxed
+     * process could drop it by exec'ing any binary. */
 
     /* Set up Linux-standard initial stack layout for usermode entry.
      * musl/glibc _start reads: sp[0]=argc, sp[1..]=argv[], NULL, envp[], NULL, auxv[]
@@ -941,16 +939,14 @@ int64_t sys_kill(uint64_t pid, uint64_t signal,
     /* Negative pid: kill process group */
     if ((int64_t)pid < 0) {
         uint64_t pgid = (uint64_t)(-(int64_t)pid);
-        return process_kill_group(pgid, (int)signal);
+        return process_kill_group_from(caller, pgid, (int)signal);
     }
 
     process_t *target = process_lookup(pid);
     if (!target)
-        return -1;
+        return -ESRCH;
 
-    /* Permission check: non-root cross-uid kill needs CAP_KILL */
-    if (caller && caller->uid != 0 && caller->uid != target->uid &&
-        !(caller->capabilities & CAP_KILL))
+    if (!process_may_signal(caller, target))
         return -EPERM;
 
     return process_deliver_signal(target, (int)signal);

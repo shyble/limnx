@@ -96,6 +96,44 @@ static void test_malloc_stress(void) {
         if (ptrs[i]) free(ptrs[i]);
 }
 
+static void test_mprotect_bounds(void) {
+    long addr = sys_mmap(1);
+    lt_ok(addr > 0, "mmap page for mprotect");
+    if (addr <= 0) {
+        lt_ok(0, "mprotect valid range succeeds");
+        lt_ok(0, "page writable after mprotect(READ|WRITE)");
+        lt_ok(0, "write to PROT_READ page faults");
+        lt_ok(0, "mprotect rejects wrapping length");
+        return;
+    }
+    volatile char *p = (volatile char *)addr;
+    p[0] = 'M';
+
+    long ret = sys_mprotect(addr, 4096, PROT_READ | PROT_WRITE);
+    lt_ok(ret == 0 && p[0] == 'M', "mprotect valid range succeeds");
+    p[1] = 'N';
+    lt_ok(p[1] == 'N', "page writable after mprotect(READ|WRITE)");
+
+    /* After PROT_READ a write must fault: the child is killed */
+    long pid = sys_fork();
+    if (pid == 0) {
+        sys_mprotect(addr, 4096, PROT_READ);
+        if (p[0] != 'M') sys_exit(97);
+        p[0] = 'X';
+        sys_exit(42);
+    }
+    long st = pid > 0 ? sys_waitpid(pid) : 42;
+    lt_ok(st != 42 && st != 97, "write to PROT_READ page faults");
+
+    /* addr + length wraps to 4096: used to pass the range check and walk
+     * page tables far beyond user space. */
+    long wrap_len = (long)(0UL - (unsigned long)addr + 4096UL);
+    ret = sys_mprotect(addr, wrap_len, PROT_READ);
+    lt_ok(ret == -22 /* EINVAL */, "mprotect rejects wrapping length");
+
+    sys_munmap(addr);
+}
+
 int main(void) {
     lt_suite("mm");
     test_mmap_munmap();
@@ -104,5 +142,6 @@ int main(void) {
     test_cow_fork();
     test_large_mmap();
     test_malloc_stress();
+    test_mprotect_bounds();
     return lt_done();
 }

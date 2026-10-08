@@ -108,9 +108,13 @@ int main(void) {
             continue;
         }
 
-        /* Set uid/gid */
-        sys_setuid(uid);
-        sys_setgid(gid);
+        /* Drop privileges: groups first, uid last, since after setuid we
+         * can no longer change groups. Never start a shell half-dropped. */
+        if (sys_setgroups(0, (void *)0) != 0 || sys_setgid(gid) != 0 ||
+            sys_setuid(uid) != 0) {
+            printf("\nlogin: failed to drop privileges\n");
+            sys_exit(1);
+        }
 
         /* Set HOME and USER env */
         sys_setenv("HOME", home);

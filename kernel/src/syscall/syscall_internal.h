@@ -42,6 +42,9 @@ void resolve_user_path(process_t *proc, const char *path, char *out);
 int fd_is_free(const fd_entry_t *e);
 void fd_close(fd_entry_t *entry);
 int check_file_perm(const process_t *proc, const vfs_node_t *node, uint8_t access);
+int check_node_access(const process_t *proc, const vfs_node_t *node, int mask);
+int check_node_access_real(const process_t *proc, const vfs_node_t *node, int mask);
+int check_parent_write(const process_t *proc, const char *path);
 int count_open_fds(process_t *proc);
 int16_t poll_check_fd(process_t *proc, int fd, int16_t events);
 

@@ -12,13 +12,52 @@ static uint32_t next_token_id = 1;
 /* Lock order: tier 5 (subsystem). See klog.h for full hierarchy */
 static spinlock_t token_lock = SPINLOCK_INIT;
 
-/* Simple prefix match: does path start with prefix? */
+/* Longest path cap_token_check() will normalise; matches MAX_PATH. */
+#define TOKEN_CHECK_PATH_MAX 256
+
+/* Lexically normalise a path: collapse repeated '/', drop "." and resolve
+ * ".." so that "/tmp/../etc" cannot pass as a path under "/tmp".
+ * Returns 0 on success, -1 if the result does not fit in max bytes. */
+static int normalize_path(const char *in, char *out, int max) {
+    int o = 0;
+    if (max < 2) return -1;
+    out[o++] = '/';
+    int i = 0;
+    while (in[i]) {
+        while (in[i] == '/') i++;
+        if (!in[i]) break;
+        int start = i;
+        while (in[i] && in[i] != '/') i++;
+        int len = i - start;
+        if (len == 1 && in[start] == '.')
+            continue;
+        if (len == 2 && in[start] == '.' && in[start + 1] == '.') {
+            while (o > 1 && out[o - 1] != '/') o--;  /* drop last component */
+            if (o > 1) o--;                          /* and its separator */
+            continue;
+        }
+        if (o > 1) {
+            if (o + 1 >= max) return -1;
+            out[o++] = '/';
+        }
+        if (o + len >= max) return -1;
+        for (int k = 0; k < len; k++)
+            out[o++] = in[start + k];
+    }
+    out[o] = '\0';
+    return 0;
+}
+
+/* Does normalised path lie at or below normalised prefix? Matches whole
+ * components only, so "/tmp" covers "/tmp/x" but not "/tmpfoo". */
 static int prefix_match(const char *prefix, const char *path) {
     if (!prefix[0]) return 1; /* empty prefix matches everything */
-    for (int i = 0; prefix[i]; i++) {
+    int i = 0;
+    for (; prefix[i]; i++) {
         if (path[i] != prefix[i]) return 0;
     }
-    return 1;
+    if (i == 1 && prefix[0] == '/') return 1;  /* root covers everything */
+    return path[i] == '\0' || path[i] == '/';
 }
 
 int cap_token_create(uint64_t owner_pid, uint32_t owner_caps,
@@ -26,6 +65,14 @@ int cap_token_create(uint64_t owner_pid, uint32_t owner_caps,
     /* Can't grant capabilities the owner doesn't have */
     if (perms & ~owner_caps)
         return -EPERM;
+
+    /* Store the resource normalised. Truncating it would widen the grant,
+     * so a resource that does not fit is rejected. */
+    char norm[TOKEN_PATH_MAX];
+    norm[0] = '\0';
+    if (resource && resource[0] &&
+        normalize_path(resource, norm, TOKEN_PATH_MAX) != 0)
+        return -ENAMETOOLONG;
 
     uint64_t flags;
     spin_lock_irqsave(&token_lock, &flags);
@@ -41,13 +88,8 @@ int cap_token_create(uint64_t owner_pid, uint32_t owner_caps,
             tokens[i].parent_id = 0;
             tokens[i].depth = 0;
 
-            /* Copy resource path */
-            int j = 0;
-            if (resource) {
-                for (; j < TOKEN_PATH_MAX - 1 && resource[j]; j++)
-                    tokens[i].resource[j] = resource[j];
-            }
-            tokens[i].resource[j] = '\0';
+            for (int j = 0; j < TOKEN_PATH_MAX; j++)
+                tokens[i].resource[j] = norm[j];
 
             int id = (int)tokens[i].id;
             spin_unlock_irqrestore(&token_lock, flags);
@@ -104,6 +146,9 @@ int cap_token_revoke(uint32_t token_id, uint64_t caller_pid) {
 }
 
 int cap_token_check(uint64_t pid, uint32_t needed_cap, const char *resource) {
+    char norm[TOKEN_CHECK_PATH_MAX];
+    int have_norm = resource && normalize_path(resource, norm, sizeof(norm)) == 0;
+
     uint64_t flags;
     spin_lock_irqsave(&token_lock, &flags);
 
@@ -120,7 +165,7 @@ int cap_token_check(uint64_t pid, uint32_t needed_cap, const char *resource) {
 
         /* Resource must match (prefix) */
         if (resource && tokens[i].resource[0]) {
-            if (!prefix_match(tokens[i].resource, resource))
+            if (!have_norm || !prefix_match(tokens[i].resource, norm))
                 continue;
         }
 
@@ -154,6 +199,14 @@ int cap_token_list(uint64_t owner_pid, token_info_t *buf, int max_count) {
 
 int cap_token_delegate(uint32_t parent_id, uint64_t caller_pid,
                         uint64_t target_pid, uint32_t perms, const char *resource) {
+    char norm[TOKEN_PATH_MAX];
+    norm[0] = '\0';
+    if (resource && resource[0]) {
+        if (normalize_path(resource, norm, TOKEN_PATH_MAX) != 0)
+            return -ENAMETOOLONG;
+        resource = norm;
+    }
+
     uint64_t flags;
     spin_lock_irqsave(&token_lock, &flags);
 

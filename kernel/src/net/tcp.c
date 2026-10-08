@@ -163,8 +163,10 @@ static int tcp_find_listener(uint16_t local_port) {
 
 /* --- RX handler --- */
 
-void tcp_rx(uint32_t src_ip, const uint8_t *data, uint32_t len) {
+void tcp_rx(uint32_t src_ip, uint32_t dst_ip, const uint8_t *data, uint32_t len) {
     if (len < 20) return;
+    /* Summing a segment that carries a valid checksum yields zero. */
+    if (tcp_checksum(src_ip, dst_ip, data, len) != 0) return;
 
     const tcp_hdr_t *hdr = (const tcp_hdr_t *)data;
     uint16_t src_port = ntohs(hdr->src_port);

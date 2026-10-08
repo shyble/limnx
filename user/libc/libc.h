@@ -23,6 +23,7 @@ long sys_write(const void *buf, unsigned long len);
 long sys_yield(void);
 void sys_exit(long status) __attribute__((noreturn));
 long sys_open(const char *path, unsigned long flags);
+long sys_access(const char *path, long mode);  /* mode: 0 or R=4|W=2|X=1 */
 long sys_read(long fd, void *buf, unsigned long len);
 long sys_close(long fd);
 long sys_stat(const char *path, void *stat_buf);
@@ -97,6 +98,12 @@ long sys_setcap(long pid, long caps);
 long sys_getrlimit(long resource, void *rlimit_ptr);
 long sys_setrlimit(long resource, const void *rlimit_ptr);
 long sys_seccomp(unsigned long mask, long strict, unsigned long mask_hi);
+/* Full allowlist for standard syscalls 0-511 (bit N = syscall N allowed). */
+#define SECCOMP_FILTER_WORDS 8
+#define SECCOMP_ALLOW(bits, nr) \
+    do { if ((nr) < 64 * SECCOMP_FILTER_WORDS) \
+             (bits)[(nr) / 64] |= 1UL << ((nr) % 64); } while (0)
+long sys_seccomp_filter(const unsigned long *bits, long strict);
 long sys_setaudit(long pid, long flags);
 long sys_unix_socket(void);
 long sys_unix_bind(long fd, const char *path);
