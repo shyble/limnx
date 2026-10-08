@@ -601,6 +601,10 @@ int64_t sys_mprotect(uint64_t virt_addr, uint64_t length,
 
     if (virt_addr & 0xFFF) return -EINVAL;  /* not page-aligned */
     if (length == 0) return -EINVAL;
+    /* Bound both values so range_end below cannot wrap around and let a
+     * huge length pass the mmap-entry check. */
+    if (virt_addr >= USER_ADDR_MAX || length > USER_ADDR_MAX - virt_addr)
+        return -EINVAL;
 
     /* Linux mprotect takes length in bytes, convert to pages */
     uint64_t num_pages = (length + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -619,43 +623,49 @@ int64_t sys_mprotect(uint64_t virt_addr, uint64_t length,
     }
     if (!found) return -EINVAL;
 
-    /* Convert prot flags to PTE flags */
-    uint64_t new_flags = PTE_PRESENT | PTE_USER;
-    if (prot == PROT_NONE) {
-        new_flags = PTE_USER;  /* no PTE_PRESENT — page inaccessible */
-    } else {
-        if (prot & PROT_WRITE)
-            new_flags |= PTE_WRITABLE;
-        if (!(prot & PROT_EXEC))
-            new_flags |= PTE_NX;
-    }
-
     /* Walk PTEs and update flags */
     for (uint64_t pg = 0; pg < num_pages; pg++) {
         uint64_t va = virt_addr + pg * PAGE_SIZE;
         uint64_t *pte = vmm_get_pte(proc->cr3, va);
         if (!pte) continue;  /* demand page not yet faulted — skip */
+        if (swap_is_entry(*pte)) {
+            /* A swap PTE holds a slot number, not a physical address.
+             * Bring the page back before rewriting its flags; otherwise the
+             * slot number would be mapped as a physical page. */
+            if (swap_in(proc->cr3, va) != 0)
+                return -ENOMEM;
+            pte = vmm_get_pte(proc->cr3, va);
+            if (!pte) return -ENOMEM;
+        }
         uint64_t old = *pte;
-        if (!(old & PTE_PRESENT) && !(old & PTE_SWAP)) continue;  /* not mapped yet */
+        if (!(old & PTE_PRESENT)) continue;  /* not mapped yet */
 
         uint64_t phys = old & PTE_ADDR_MASK;
-        /* Preserve COW bit if set (don't grant write on COW page via mprotect) */
-        uint64_t cow = old & PTE_COW;
-        uint64_t final_flags = new_flags | cow;
-        if (cow) {
-            if (final_flags & PTE_WRITABLE) {
-                /* COW page: don't actually make writable yet — keep COW semantics.
-                 * But mark WAS_WRITABLE so COW handler knows to grant write later. */
-                final_flags &= ~PTE_WRITABLE;
-                final_flags |= PTE_WAS_WRITABLE;
+        /* Start from the existing entry so arch-specific bits (on ARM64 the
+         * descriptor type, access flag, shareability and memory attributes)
+         * are kept, and change only the permission bits. */
+        uint64_t flags = old & ~PTE_ADDR_MASK;
+        if (prot == PROT_NONE) {
+            flags &= ~PTE_PRESENT;  /* page inaccessible */
+        } else {
+            flags = (prot & PROT_EXEC) ? (flags & ~PTE_NX) : (flags | PTE_NX);
+            if (flags & PTE_COW) {
+                /* COW page: keep it read-only so the fault handler still
+                 * copies it; WAS_WRITABLE tells that handler whether the
+                 * write may then be granted. */
+                flags = PTE_MAKE_READONLY(flags);
+                if (prot & PROT_WRITE)
+                    flags |= PTE_WAS_WRITABLE;
+                else
+                    flags &= ~PTE_WAS_WRITABLE;
+            } else if (prot & PROT_WRITE) {
+                flags = PTE_MAKE_WRITABLE(flags);
             } else {
-                /* Making COW page read-only: clear WAS_WRITABLE so COW handler
-                 * knows this is a genuine protection fault */
-                final_flags &= ~PTE_WAS_WRITABLE;
+                flags = PTE_MAKE_READONLY(flags);
             }
         }
 
-        *pte = phys | final_flags;
+        *pte = phys | flags;
         flush_page(va);
     }
 
