@@ -40,6 +40,10 @@ long sys_open(const char *path, unsigned long flags) {
 #endif
 }
 
+long sys_access(const char *path, long mode) {
+    return __syscall4(SYS_FACCESSAT, AT_FDCWD, (long)path, mode, 0);
+}
+
 long sys_read(long fd, void *buf, unsigned long len) {
     return __syscall3(SYS_READ, fd, (long)buf, (long)len);
 }

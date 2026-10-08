@@ -23,6 +23,7 @@ long sys_write(const void *buf, unsigned long len);
 long sys_yield(void);
 void sys_exit(long status) __attribute__((noreturn));
 long sys_open(const char *path, unsigned long flags);
+long sys_access(const char *path, long mode);  /* mode: 0 or R=4|W=2|X=1 */
 long sys_read(long fd, void *buf, unsigned long len);
 long sys_close(long fd);
 long sys_stat(const char *path, void *stat_buf);

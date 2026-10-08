@@ -920,16 +920,33 @@ int process_deliver_signal(process_t *proc, int signum) {
     return 0;
 }
 
-int process_kill_group(uint64_t pgid, int signum) {
+/* May sender signal target? Root or CAP_KILL may signal anyone; otherwise
+ * the sender's real or effective uid must match the target's real or saved
+ * uid. A NULL sender is the kernel itself. */
+int process_may_signal(const process_t *sender, const process_t *target) {
+    if (!sender || sender->euid == 0 || (sender->capabilities & CAP_KILL))
+        return 1;
+    return sender->uid == target->uid || sender->uid == target->suid ||
+           sender->euid == target->uid || sender->euid == target->suid;
+}
+
+/* Signal every process in a group that sender may signal. Returns 0 if at
+ * least one was signalled, -EPERM if the group exists but none could be,
+ * -ESRCH otherwise. */
+int process_kill_group_from(const process_t *sender, uint64_t pgid, int signum) {
     uint64_t flags;
     process_t *targets[MAX_PROCS];
-    int n = 0;
+    int n = 0, denied = 0;
 
     /* Collect targets under lock, deliver signals after releasing */
     spin_lock_irqsave(&proc_table_lock, &flags);
     for (int i = 0; i < MAX_PROCS; i++) {
-        if (proc_table[i] && proc_table[i]->pgid == pgid)
-            targets[n++] = proc_table[i];
+        if (proc_table[i] && proc_table[i]->pgid == pgid) {
+            if (process_may_signal(sender, proc_table[i]))
+                targets[n++] = proc_table[i];
+            else
+                denied++;
+        }
     }
     spin_unlock_irqrestore(&proc_table_lock, flags);
 
@@ -938,7 +955,12 @@ int process_kill_group(uint64_t pgid, int signum) {
         if (process_deliver_signal(targets[i], signum) == 0)
             count++;
     }
-    return count > 0 ? 0 : -1;
+    if (count > 0) return 0;
+    return denied > 0 ? -EPERM : -ESRCH;
+}
+
+int process_kill_group(uint64_t pgid, int signum) {
+    return process_kill_group_from(NULL, pgid, signum);
 }
 
 /* --- Procfs accessor helpers (avoids circular include with vfs.h) --- */

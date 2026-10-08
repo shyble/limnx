@@ -21,12 +21,13 @@ int64_t sys_setuid(uint64_t uid_arg, uint64_t a2,
     uint16_t new_uid = (uint16_t)uid_arg;
 
     if (proc->euid == 0) {
-        /* Privileged: set all three IDs, drop caps if going non-root */
+        /* Privileged: set all three IDs, drop privileged caps if going
+         * non-root */
         proc->uid = new_uid;
         proc->euid = new_uid;
         proc->suid = new_uid;
         if (new_uid != 0)
-            proc->capabilities = 0;  /* drop all caps */
+            proc->capabilities &= CAP_BASIC;
     } else {
         /* Unprivileged: can only set euid to real uid or saved uid */
         if (new_uid != proc->uid && new_uid != proc->suid) {
@@ -112,6 +113,14 @@ int64_t sys_setcap(uint64_t pid_arg, uint64_t caps,
     uint64_t pid = pid_arg == 0 ? caller->pid : pid_arg;
     process_t *target = process_lookup(pid);
     if (!target) return -ESRCH;
+
+    /* Without root, only processes running entirely as the caller's uid
+     * may be changed; otherwise CAP_SYS_ADMIN could strip or rewrite the
+     * capabilities of root or other users' processes. */
+    if (caller->euid != 0 &&
+        (target->uid != caller->euid || target->euid != caller->euid ||
+         target->suid != caller->euid))
+        return -EPERM;
 
     target->capabilities = (uint32_t)caps;
     return 0;

@@ -102,28 +102,67 @@ int fd_is_free(const fd_entry_t *e) {
 /* --- Permission helper --- */
 
 /* Check if process belongs to a group (primary or supplementary) */
-static int process_in_group(const process_t *proc, uint16_t gid) {
-    if (proc->egid == gid) return 1;
+static int process_in_group(const process_t *proc, uint16_t primary_gid,
+                            uint16_t gid) {
+    if (primary_gid == gid) return 1;
     for (int i = 0; i < proc->ngroups && i < MAX_SUPPL_GROUPS; i++) {
         if (proc->groups[i] == gid) return 1;
     }
     return 0;
 }
 
-int check_file_perm(const process_t *proc, const vfs_node_t *node, uint8_t access) {
-    if (proc->euid == 0) return 0;  /* root bypasses */
+/* Check rwx access to a node. mask is a combination of VFS_PERM_READ,
+ * VFS_PERM_WRITE and VFS_PERM_EXEC. Root bypasses read/write checks but,
+ * as on Unix, may only execute a file that has at least one x bit set. */
+static int node_access_for(const process_t *proc, uint16_t uid, uint16_t gid,
+                           const vfs_node_t *node, int mask) {
+    if (uid == 0) {
+        if ((mask & VFS_PERM_EXEC) && node->type != VFS_DIRECTORY &&
+            !(node->mode & 0111))
+            return -EACCES;
+        return 0;
+    }
     uint16_t perm_bits;
-    if (proc->euid == node->uid)
+    if (uid == node->uid)
         perm_bits = (node->mode >> 6) & 7;
-    else if (process_in_group(proc, node->gid))
+    else if (process_in_group(proc, gid, node->gid))
         perm_bits = (node->mode >> 3) & 7;
     else
         perm_bits = node->mode & 7;
-    if ((access == O_RDONLY || access == O_RDWR) && !(perm_bits & 4))
-        return -EACCES;
-    if ((access == O_WRONLY || access == O_RDWR) && !(perm_bits & 2))
+    if ((perm_bits & mask) != mask)
         return -EACCES;
     return 0;
+}
+
+int check_node_access(const process_t *proc, const vfs_node_t *node, int mask) {
+    return node_access_for(proc, proc->euid, proc->egid, node, mask);
+}
+
+/* Same check using the real ids, as access(2) requires. */
+int check_node_access_real(const process_t *proc, const vfs_node_t *node, int mask) {
+    return node_access_for(proc, proc->uid, proc->gid, node, mask);
+}
+
+int check_file_perm(const process_t *proc, const vfs_node_t *node, uint8_t access) {
+    int mask = 0;
+    if (access == O_RDONLY || access == O_RDWR)
+        mask |= VFS_PERM_READ;
+    if (access == O_WRONLY || access == O_RDWR)
+        mask |= VFS_PERM_WRITE;
+    return check_node_access(proc, node, mask);
+}
+
+/* Check write permission on the directory that contains path. */
+int check_parent_write(const process_t *proc, const char *path) {
+    char parent_path[MAX_PATH], base_name[MAX_PATH];
+    vfs_path_split(path, parent_path, base_name);
+    int parent_idx = vfs_resolve_path(parent_path);
+    if (parent_idx < 0)
+        return -ENOENT;
+    vfs_node_t *parent_node = vfs_get_node(parent_idx);
+    if (!parent_node)
+        return -ENOENT;
+    return check_node_access(proc, parent_node, VFS_PERM_WRITE);
 }
 
 /* Count open fds for a process */

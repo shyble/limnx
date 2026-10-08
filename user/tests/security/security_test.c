@@ -186,6 +186,145 @@ static void test_seccomp_spawn_inherits(void) {
         lt_ok(sys_waitpid(pid) == 42, "seccomp filter inherited by spawned process");
 }
 
+#define SEC_DIR "/tmp/sectest"
+
+static void write_file(const char *path, const char *data, long len) {
+    long fd = sys_create(path);
+    if (fd >= 0) {
+        sys_fwrite(fd, data, len);
+        sys_close(fd);
+    }
+}
+
+static int file_has(const char *path, const char *want) {
+    char buf[16];
+    long fd = sys_open(path, 0);
+    if (fd < 0) return 0;
+    long n = sys_read(fd, buf, sizeof(buf) - 1);
+    sys_close(fd);
+    if (n < 0) return 0;
+    buf[n] = '\0';
+    return lt_strcontains(buf, want) && n == (long)strlen(want);
+}
+
+/* Root-owned test tree: 0755 dirs, 0644 files. */
+static void setup_sec_dir(void) {
+    sys_mkdir(SEC_DIR);
+    sys_chmod(SEC_DIR, 0755);
+    sys_mkdir(SEC_DIR "/sub");
+    sys_chmod(SEC_DIR "/sub", 0755);
+    write_file(SEC_DIR "/victim", "keep", 4);
+    sys_chmod(SEC_DIR "/victim", 0644);
+    write_file(SEC_DIR "/sub/file", "data", 4);
+    sys_chmod(SEC_DIR "/sub/file", 0644);
+    write_file(SEC_DIR "/subx", "data", 4);
+    sys_chmod(SEC_DIR "/subx", 0644);
+}
+
+static void test_dac_as_user(void) {
+    /* An ordinary user must not modify root's files, whatever syscall */
+    long pid = sys_fork();
+    if (pid == 0) {
+        if (sys_setuid(65534) != 0) sys_exit(0);
+        int ok = 0;
+        if (sys_truncate(SEC_DIR "/victim", 0) == -13) ok |= 1;
+        if (sys_rename(SEC_DIR "/victim", SEC_DIR "/moved") == -13) ok |= 2;
+        if (sys_access(SEC_DIR "/victim", 2 /* W_OK */) == -13) ok |= 4;
+        if (sys_access(SEC_DIR "/victim", 4 /* R_OK */) == 0) ok |= 8;
+        sys_exit(ok);
+    }
+    long st = pid > 0 ? sys_waitpid(pid) : 0;
+    lt_ok(st & 1, "user cannot truncate root's file");
+    lt_ok(st & 2, "user cannot rename in root's directory");
+    lt_ok(st & 4, "access(W_OK) denied on root's 0644 file");
+    lt_ok(st & 8, "access(R_OK) allowed on root's 0644 file");
+    lt_ok(file_has(SEC_DIR "/victim", "keep"), "root's file left intact");
+}
+
+static void test_exec_perm_bits(void) {
+    /* Exec must honour the owner/group/other x bits, not only "other".
+     * Uses the root-owned /hello.elf, restoring its mode afterwards. */
+    const char *path = "/hello.elf";
+    const char *argv[] = {path, (void *)0};
+
+    sys_chmod(path, 0700);
+    long pid = sys_fork();
+    if (pid == 0) {
+        sys_execve(path, argv);
+        sys_exit(98);
+    }
+    lt_ok(pid > 0 && sys_waitpid(pid) == 0, "owner can exec 0700 file");
+
+    pid = sys_fork();
+    if (pid == 0) {
+        sys_setuid(65534);
+        sys_execve(path, argv);
+        sys_exit(98);
+    }
+    lt_ok(pid > 0 && sys_waitpid(pid) == 98, "other user cannot exec 0700 file");
+
+    sys_chmod(path, 0644);
+    pid = sys_fork();
+    if (pid == 0) {
+        sys_execve(path, argv);
+        sys_exit(98);
+    }
+    lt_ok(pid > 0 && sys_waitpid(pid) == 98, "root cannot exec file without x bits");
+
+    sys_chmod(path, 0755);
+}
+
+static void test_kill_perm(void) {
+    /* A root process in its own process group */
+    long victim = sys_fork();
+    if (victim == 0) {
+        sys_setpgid(0, 0);
+        long ts[2] = {0, 50000000};
+        for (int i = 0; i < 200; i++)
+            sys_nanosleep(ts);
+        sys_exit(0);
+    }
+    if (victim > 0)
+        sys_setpgid(victim, victim);
+
+    long pid = sys_fork();
+    if (pid == 0) {
+        if (sys_setuid(65534) != 0) sys_exit(0);
+        int ok = 0;
+        if (sys_kill(-victim, SIGKILL) == -1 /* EPERM */) ok |= 1;
+        if (sys_kill(victim, SIGKILL) == -1 /* EPERM */) ok |= 2;
+        sys_exit(ok);
+    }
+    long st = pid > 0 ? sys_waitpid(pid) : 0;
+    lt_ok(st & 1, "user cannot signal root's process group");
+    lt_ok(st & 2, "user cannot signal root's process");
+
+    if (victim > 0) {
+        sys_kill(victim, SIGKILL);
+        sys_waitpid(victim);
+    }
+}
+
+static void test_token_paths(void) {
+    /* A token scoped to SEC_DIR/sub must not reach outside it via ".."
+     * or a sibling whose name merely starts with "sub". */
+    long pid = sys_fork();
+    if (pid == 0) {
+        int ok = 0;
+        if (sys_token_create(CAP_FS_WRITE, sys_getpid(), SEC_DIR "/sub") > 0) ok |= 1;
+        sys_setcap(0, sys_getcap() & ~CAP_FS_WRITE);
+        if (sys_truncate(SEC_DIR "/sub/file", 4) == 0) ok |= 2;
+        if (sys_truncate(SEC_DIR "/sub/../victim", 4) == -13) ok |= 4;
+        if (sys_truncate(SEC_DIR "/subx", 4) == -13) ok |= 8;
+        sys_exit(ok);
+    }
+    long st = pid > 0 ? sys_waitpid(pid) : 0;
+    lt_ok(st & 1, "token created for directory");
+    lt_ok(st & 2, "token grants access inside its directory");
+    lt_ok(st & 4, "token does not grant access via ..");
+    lt_ok(st & 8, "token does not grant access to sibling prefix");
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && lt_strcontains(argv[1], "--seccomp-probe"))
         seccomp_fork_probe();
@@ -202,5 +341,10 @@ int main(int argc, char **argv) {
     test_seccomp_cannot_widen();
     test_seccomp_survives_exec();
     test_seccomp_spawn_inherits();
+    setup_sec_dir();
+    test_dac_as_user();
+    test_exec_perm_bits();
+    test_kill_perm();
+    test_token_paths();
     return lt_done();
 }

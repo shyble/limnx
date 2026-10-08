@@ -161,6 +161,8 @@ void process_seccomp_inherit(process_t *child, const process_t *parent);
 
 /* Kill all processes in a process group */
 int process_kill_group(uint64_t pgid, int signum);
+int process_kill_group_from(const process_t *sender, uint64_t pgid, int signum);
+int process_may_signal(const process_t *sender, const process_t *target);
 
 process_t *process_create(const uint8_t *code, uint64_t code_size);
 process_t *process_create_from_elf(const uint8_t *elf, uint64_t size);
