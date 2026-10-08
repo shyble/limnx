@@ -358,6 +358,10 @@ long sys_seccomp(unsigned long mask, long strict, unsigned long mask_hi) {
     return __syscall3(SYS_SECCOMP, (long)mask, strict, (long)mask_hi);
 }
 
+long sys_seccomp_filter(const unsigned long *bits, long strict) {
+    return __syscall4(SYS_SECCOMP, 0, strict, 0, (long)bits);
+}
+
 long sys_setaudit(long pid, long flags) {
     return __syscall2(SYS_SETAUDIT, pid, flags);
 }

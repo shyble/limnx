@@ -38,13 +38,8 @@ int main(void) {
      * Uses SYS_* macros which resolve to correct numbers per arch.
      * All Limnx syscalls (512+) pass through automatically. */
     {
-        unsigned long mask_lo = 0;
-        unsigned long mask_hi = 0;
-        /* Helper: set bit N in the appropriate mask half */
-        #define ALLOW(nr) do { \
-            if ((nr) < 64) mask_lo |= (1UL << (nr)); \
-            else if ((nr) < 128) mask_hi |= (1UL << ((nr) - 64)); \
-        } while(0)
+        unsigned long filter[SECCOMP_FILTER_WORDS] = {0};
+        #define ALLOW(nr) SECCOMP_ALLOW(filter, nr)
 
         ALLOW(SYS_READ);           /* read from fd */
         ALLOW(SYS_WRITE);          /* write to fd */
@@ -62,14 +57,14 @@ int main(void) {
         ALLOW(SYS_GETPID);         /* identity */
         ALLOW(SYS_EXIT);           /* exit */
         ALLOW(SYS_EXIT_GROUP);     /* exit group */
-        ALLOW(SYS_SECCOMP);        /* allow seccomp itself (for re-entry) */
+        ALLOW(SYS_SECCOMP);        /* allow seccomp itself (can only narrow) */
         ALLOW(SYS_PPOLL);          /* poll (ARM64 uses ppoll) */
         #ifdef SYS_POLL
         ALLOW(SYS_POLL);           /* poll (x86_64 has native poll) */
         #endif
 
         #undef ALLOW
-        sys_seccomp(mask_lo, 1 /* strict */, mask_hi);
+        sys_seccomp_filter(filter, 1 /* strict */);
         printf("[worker %d] seccomp sandbox active\n", worker_id);
     }
 

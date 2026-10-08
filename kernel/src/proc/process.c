@@ -20,6 +20,21 @@ static uint64_t next_pid = 1;
 static process_t *proc_table[MAX_PROCS];
 static spinlock_t proc_table_lock = SPINLOCK_INIT;
 
+/* Copy the seccomp filter from parent to child. A sandboxed process must
+ * never be able to produce an unsandboxed child, whatever path creates it
+ * (fork, vfork, or spawn-from-path). */
+void process_seccomp_inherit(process_t *child, const process_t *parent) {
+    for (int i = 0; i < SECCOMP_WORDS; i++)
+        child->seccomp_bits[i] = parent ? parent->seccomp_bits[i] : 0;
+    if (!parent) {
+        child->seccomp_strict = 0;
+        child->seccomp_active = 0;
+        return;
+    }
+    child->seccomp_strict = parent->seccomp_strict;
+    child->seccomp_active = parent->seccomp_active;
+}
+
 uint64_t process_alloc_pid(void) {
     uint64_t flags;
     spin_lock_irqsave(&proc_table_lock, &flags);
@@ -321,9 +336,7 @@ process_t *process_create(const uint8_t *code, uint64_t code_size) {
     proc->rlimit_cpu_ticks = 0;
     proc->rlimit_nfds = 0;
     proc->used_mem_pages = 0;
-    proc->seccomp_mask = 0;
-    proc->seccomp_mask_hi = 0;
-    proc->seccomp_strict = 0;
+    process_seccomp_inherit(proc, (caller && caller->process) ? caller->process : NULL);
     proc->audit_flags = 0;
     proc->daemon = 0;
 
@@ -528,9 +541,7 @@ process_t *process_create_from_elf(const uint8_t *elf, uint64_t size) {
     proc->rlimit_cpu_ticks = 0;
     proc->rlimit_nfds = 0;
     proc->used_mem_pages = 0;
-    proc->seccomp_mask = 0;
-    proc->seccomp_mask_hi = 0;
-    proc->seccomp_strict = 0;
+    process_seccomp_inherit(proc, (caller && caller->process) ? caller->process : NULL);
     proc->audit_flags = 0;
     proc->daemon = 0;
 
@@ -692,9 +703,7 @@ process_t *process_fork(process_t *parent, const fork_context_t *ctx) {
     child->rlimit_cpu_ticks = parent->rlimit_cpu_ticks;
     child->rlimit_nfds = parent->rlimit_nfds;
     child->used_mem_pages = parent->used_mem_pages;
-    child->seccomp_mask = parent->seccomp_mask;
-    child->seccomp_mask_hi = parent->seccomp_mask_hi;
-    child->seccomp_strict = parent->seccomp_strict;
+    process_seccomp_inherit(child, parent);
     child->audit_flags = parent->audit_flags;
     child->daemon = 0;  /* forked children are never daemons */
     child->exit_status = 0;
@@ -792,6 +801,14 @@ process_t *process_fork_vfork(process_t *parent, const fork_context_t *ctx) {
     child->sgid = parent->sgid;
     child->umask = parent->umask;
     child->capabilities = parent->capabilities;
+    child->ngroups = parent->ngroups;
+    for (int g = 0; g < parent->ngroups && g < MAX_SUPPL_GROUPS; g++)
+        child->groups[g] = parent->groups[g];
+    child->rlimit_mem_pages = parent->rlimit_mem_pages;
+    child->rlimit_cpu_ticks = parent->rlimit_cpu_ticks;
+    child->rlimit_nfds = parent->rlimit_nfds;
+    process_seccomp_inherit(child, parent);
+    child->audit_flags = parent->audit_flags;
     child->daemon = 0;
     child->exit_status = 0;
     child->exited = 0;

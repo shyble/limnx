@@ -578,10 +578,8 @@ int64_t sys_execve(uint64_t path_ptr, uint64_t argv_ptr,
         proc->sgid = exec_gid;
     }
 
-    /* Reset security state */
-    proc->seccomp_mask = 0;
-    proc->seccomp_mask_hi = 0;
-    proc->seccomp_strict = 0;
+    /* The seccomp filter deliberately survives exec: otherwise a sandboxed
+     * process could drop it by exec'ing any binary. */
 
     /* Set up Linux-standard initial stack layout for usermode entry.
      * musl/glibc _start reads: sp[0]=argc, sp[1..]=argv[], NULL, envp[], NULL, auxv[]

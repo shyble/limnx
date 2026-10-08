@@ -387,23 +387,25 @@ int64_t syscall_dispatch(uint64_t num, uint64_t arg1, uint64_t arg2,
         return -ENOSYS;
     }
 
-    /* Seccomp filtering — bitmask covers syscalls 0-127.
-     * Syscalls >= 128 (including Limnx custom 512+) are allowed if
-     * any seccomp mask bit is set (we don't have enough bits for all). */
+    /* Seccomp filtering: while a filter is active, standard syscalls
+     * (< SECCOMP_LIMNX_BASE) need an allow bit. sys_seccomp itself only ever
+     * narrows the filter. Limnx-specific syscalls are not filtered so
+     * sandboxed services can keep using IPC; any process they create
+     * inherits the filter. */
     thread_t *st = thread_get_current();
-    if (st && st->process &&
-        (st->process->seccomp_mask != 0 || st->process->seccomp_mask_hi != 0) &&
-        num != SYS_EXIT && num != SYS_RT_SIGRETURN) {
+    if (st && st->process && st->process->seccomp_active &&
+        num != SYS_EXIT && num != SYS_EXIT_GROUP && num != SYS_RT_SIGRETURN) {
         int allowed = 1;
-        if (num < 64)
-            allowed = !!(st->process->seccomp_mask & (1ULL << num));
-        else if (num < 128)
-            allowed = !!(st->process->seccomp_mask_hi & (1ULL << (num - 64)));
-        /* num >= 128: allowed by default (can't bitmap-filter high numbers) */
+        if (num < SECCOMP_LIMNX_BASE)
+            allowed = !!(st->process->seccomp_bits[num / 64] & (1ULL << (num % 64)));
         if (!allowed) {
             if (st->process->seccomp_strict) {
-                process_deliver_signal(st->process, SIGKILL);
-                return -EACCES;
+                /* Terminate now: SIGKILL on the running thread would only
+                 * take effect at the next reschedule, letting the process
+                 * keep executing after the denied call. */
+                serial_printf("[proc] Process %lu killed by seccomp (syscall %lu)\n",
+                              st->process->pid, num);
+                sys_exit((uint64_t)(128 + SIGKILL), 0, 0, 0, 0);
             }
             return -EACCES;
         }
