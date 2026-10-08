@@ -78,7 +78,7 @@ typedef struct tcp_conn {
 } tcp_conn_t;
 
 void tcp_init(void);
-void tcp_rx(uint32_t src_ip, const uint8_t *data, uint32_t len);
+void tcp_rx(uint32_t src_ip, uint32_t dst_ip, const uint8_t *data, uint32_t len);
 void tcp_timer_check(void);
 
 /* Syscall-facing API */

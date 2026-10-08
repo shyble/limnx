@@ -333,7 +333,7 @@ static void handle_ipv4(const uint8_t *data, uint32_t len) {
     if (ip_checksum(data, ihl) != 0) return;
 
     uint16_t total = ntohs(ip->total_len);
-    if (total > len) return;
+    if (total > len || total < ihl) return;
 
     uint32_t src_ip = ntohl(ip->src_ip);
     uint32_t dst_ip = ntohl(ip->dst_ip);
@@ -349,8 +349,9 @@ static void handle_ipv4(const uint8_t *data, uint32_t len) {
     if (ip->protocol == IP_PROTO_ICMP) {
         handle_icmp(src_ip, payload, payload_len);
     } else if (ip->protocol == IP_PROTO_TCP) {
-        extern void tcp_rx(uint32_t src_ip, const uint8_t *data, uint32_t len);
-        tcp_rx(src_ip, payload, payload_len);
+        extern void tcp_rx(uint32_t src_ip, uint32_t dst_ip,
+                           const uint8_t *data, uint32_t len);
+        tcp_rx(src_ip, dst_ip, payload, payload_len);
     } else if (ip->protocol == IP_PROTO_UDP) {
         handle_udp(src_ip, payload, payload_len);
     }
