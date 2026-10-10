@@ -134,6 +134,10 @@ int transformer_init(transformer_t *tf, const tf_config_t *cfg,
     if (cfg->dim % cfg->n_heads != 0)
         return -1;
 
+    /* Callers pass uninitialised (often stack) structs; without this,
+     * fields such as tf->quantized hold garbage and the forward pass
+     * takes the quantized path with invalid weight pointers. */
+    memset(tf, 0, sizeof(*tf));
     tf->cfg = *cfg;
     tf->pos = 0;
 
